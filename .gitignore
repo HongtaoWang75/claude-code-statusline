@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# 备份 / 日志
+*.bak
+*.bak.*
+*.log
+
+# 本机构建产物与本地配置（不入库）
+plugins/*/scripts/dspg-status.exe
+plugins/*/scripts/dspg.env

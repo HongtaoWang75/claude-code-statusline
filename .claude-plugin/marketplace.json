@@ -1,0 +1,18 @@
+{
+  "name": "deepseek-price-guard",
+  "owner": {
+    "name": "Wang Hongtao"
+  },
+  "metadata": {
+    "description": "DeepSeek 峰谷定价守护与余额监控插件",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "deepseek-price-guard",
+      "source": "./plugins/deepseek-price-guard",
+      "description": "高峰时段（09:00-12:00 / 14:00-18:00）阻止工具调用，实时余额注入与低余额提醒",
+      "category": "monitoring"
+    }
+  ]
+}
