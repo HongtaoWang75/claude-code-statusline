@@ -1,5 +1,5 @@
 {
-  "name": "deepseek-price-guard",
+  "name": "claude-code-statusline",
   "owner": {
     "name": "Wang Hongtao"
   },
@@ -9,8 +9,8 @@
   },
   "plugins": [
     {
-      "name": "deepseek-price-guard",
-      "source": "./plugins/deepseek-price-guard",
+      "name": "claude-code-statusline",
+      "source": "./plugins/claude-code-statusline",
       "description": "高峰时段（09:00-12:00 / 14:00-18:00）阻止工具调用，实时余额注入与低余额提醒",
       "category": "monitoring"
     }

@@ -1,10 +1,10 @@
-# DeepSeek 价格守护 · Claude Code 插件
+# claude-code-statusline · DeepSeek 价格守护与状态栏
 
 给 **Claude Code + DeepSeek** 用户的一组守护工具：峰谷价时段硬拦截、余额/用量状态栏，以及一套让状态栏在 Windows 上**又快又稳**的工程实现。
 
 > 非官方插件，与 DeepSeek 无隶属关系。只调用官方公开接口 `GET https://api.deepseek.com/user/balance` 读余额。
 
-![状态栏预览](plugins/deepseek-price-guard/demo-shot.png)
+![状态栏预览](plugins/claude-code-statusline/demo-shot.png)
 
 （上图由 `scripts/demo-statusline.py` 用**真实脚本 + 伪造 stdin** 渲染，两种调色板对比）
 
@@ -76,7 +76,7 @@ CC → bash（CC 强制，省不掉）→ dspg-status.exe（~15 ms）→ 127.0.0
 2. shim 顺手把 daemon 拉起来（`pythonw`，无窗口），下一帧自动恢复
 3. daemon 内置看门狗：**taskkill 僵尸超过 40 个就自动把 `refreshInterval` 降回 5 秒**并记日志（防雪崩的自动止血）
 
-启用步骤见 [`scripts/dspg-status.c`](plugins/deepseek-price-guard/scripts/dspg-status.c) 头部注释；`dspg.env`（与本 exe 同目录，已被 gitignore）可指定 `PYTHONW=<绝对路径>`。
+启用步骤见 [`scripts/dspg-status.c`](plugins/claude-code-statusline/scripts/dspg-status.c) 头部注释；`dspg.env`（与本 exe 同目录，已被 gitignore）可指定 `PYTHONW=<绝对路径>`。
 
 ---
 
@@ -84,8 +84,8 @@ CC → bash（CC 强制，省不掉）→ dspg-status.exe（~15 ms）→ 127.0.0
 
 ```bash
 # 在 Claude Code 里
-/plugin marketplace add <你的 GitHub 账号>/deepseek-price-guard
-/plugin install deepseek-price-guard@deepseek-price-guard
+/plugin marketplace add <你的 GitHub 账号>/claude-code-statusline
+/plugin install claude-code-statusline@claude-code-statusline
 ```
 
 前置条件：
@@ -97,7 +97,7 @@ CC → bash（CC 强制，省不掉）→ dspg-status.exe（~15 ms）→ 127.0.0
 {
   "statusLine": {
     "type": "command",
-    "command": "python \"C:/Users/<你>/.claude/plugins/marketplaces/deepseek-price-guard/plugins/deepseek-price-guard/scripts/deepseek-status.py\"",
+    "command": "python \"C:/Users/<你>/.claude/plugins/marketplaces/claude-code-statusline/plugins/claude-code-statusline/scripts/deepseek-status.py\"",
     "refreshInterval": 5
   }
 }
@@ -138,7 +138,7 @@ CC → bash（CC 强制，省不掉）→ dspg-status.exe（~15 ms）→ 127.0.0
 
 ```
 .claude-plugin/marketplace.json          # marketplace 清单
-plugins/deepseek-price-guard/
+plugins/claude-code-statusline/
 ├── .claude-plugin/plugin.json
 ├── commands/balance.md                  # /balance 命令
 ├── hooks/                               # PreToolUse 峰谷拦截
