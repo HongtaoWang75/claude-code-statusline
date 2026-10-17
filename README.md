@@ -74,7 +74,7 @@ CC → bash（CC 强制，省不掉）→ dspg-status.exe（~15 ms）→ 127.0.0
 
 1. daemon 不在时，shim 打印 daemon 上一帧写的整行（`~/.claude/.dspg_line.txt`）——**不是空白**
 2. shim 顺手把 daemon 拉起来（`pythonw`，无窗口），下一帧自动恢复
-3. daemon 内置看门狗：**taskkill 僵尸超过 40 个就自动把 `refreshInterval` 降回 5 秒**并记日志（防雪崩的自动止血）
+3. daemon 内置看门狗（每 10 秒）：**挂住的 `taskkill` 超过 60 个就自动回收**（它们独占的 `conhost` 会随之退出）——这是对 Claude Code「取消时 `taskkill /T` 清进程树」副作用的自动抑制；回收后仍连续两次超过 100 个，才把 `refreshInterval` 降回 5 秒兜底（防雪崩自动止血）
 
 启用步骤见 [`scripts/dspg-status.c`](plugins/claude-code-statusline/scripts/dspg-status.c) 头部注释；`dspg.env`（与本 exe 同目录，已被 gitignore）可指定 `PYTHONW=<绝对路径>`。
 

@@ -31,8 +31,12 @@ HOME = pathlib.Path(os.path.expanduser("~"))
 HERE = pathlib.Path(__file__).resolve().parent
 LINE_FILE = HOME / ".claude" / ".dspg_line.txt"
 LOG_FILE = HOME / ".claude" / ".dspg_statusd.log"
+SESSIONS_FILE = HOME / ".claude" / ".dspg_sessions.json"   # 活会话 → 工作目录（重启脚本用）
+SESSIONS = {}
+_LAST_SESS_SAVE = 0.0
 LOCK = threading.Lock()
-IDLE_EXIT_AFTER = 10          # 每轮 30 秒，连续这么多轮没见到 claude.exe 就退出
+WATCH_INTERVAL_S = 10         # 看门狗周期：10 秒（回收挂死的 taskkill 要够勤）
+IDLE_EXIT_AFTER = 30          # 连续这么多轮没见到 claude.exe（5 分钟）就退出
 
 
 def log(msg):
@@ -55,8 +59,9 @@ def load_status_module():
 MOD = load_status_module()
 
 
-def proc_count(name):
-    """用 Toolhelp32 快照数进程——不依赖 WMI（内存吃紧时 WMI 会直接瘫掉）。"""
+def iter_procs(name):
+    """返回某进程名的全部 PID（Toolhelp32 快照，不依赖 WMI——内存吃紧时 WMI 会瘫）。"""
+    pids = []
     try:
         import ctypes
         from ctypes import wintypes
@@ -71,20 +76,46 @@ def proc_count(name):
 
         k = ctypes.windll.kernel32
         snap = k.CreateToolhelp32Snapshot(0x2, 0)
-        if snap == -1 or snap == 0xFFFFFFFF:
-            return -1
-        n = 0
+        if snap in (-1, 0xFFFFFFFF):
+            return pids
         e = PROCESSENTRY32()
         e.dwSize = ctypes.sizeof(PROCESSENTRY32)
         ok = k.Process32First(snap, ctypes.byref(e))
         while ok:
             if e.szExeFile.decode("ascii", "ignore").strip().lower() == name.lower():
-                n += 1
+                pids.append(e.th32ProcessID)
             ok = k.Process32Next(snap, ctypes.byref(e))
         k.CloseHandle(snap)
-        return n
     except Exception:
-        return -1
+        pass
+    return pids
+
+
+def proc_count(name):
+    return len(iter_procs(name))
+
+
+def reap_taskkills():
+    """自动抑制 CC 进程清理的副作用：直接 TerminateProcess 掉挂死的 taskkill.exe。
+
+    CC 在取消/停止命令时会 spawn `taskkill /T /F` 清进程树；目标一时杀不掉时这些
+    taskkill 会挂住不退出，几十秒就能堆积到 300+ 个（连带 300 个 conhost，吃掉 7.5 GB
+    → 内存告急 → 机器越卡越积，2026-10-17 实测）。每 30 秒回收一次，它们就永远堆不起来；
+    杀掉 taskkill 后它独占的 conhost 会随客户端消失自动退出。
+    """
+    n = 0
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        for pid in iter_procs("taskkill.exe"):
+            h = k.OpenProcess(0x0001, False, pid)   # PROCESS_TERMINATE
+            if h:
+                if k.TerminateProcess(h, 1):
+                    n += 1
+                k.CloseHandle(h)
+    except Exception:
+        pass
+    return n
 
 
 def try_downgrade(taskkills):
@@ -101,17 +132,22 @@ def try_downgrade(taskkills):
 
 
 def watchdog():
-    """每 30 秒：① 僵尸连续两次超阈值才自动降级；② 长时间没有 claude.exe 就退出。
+    """每 10 秒：① 挂住的 taskkill 超阈值就自动回收；② 回收后仍连续两次超阈值才降级；
+    ③ 长时间没有 claude.exe 就退出。
 
-    阈值和"连续两次"都刻意放宽：工具调用密集时短时出现几十个 in-flight 的 taskkill
-    是正常的，真正雪崩是 200~300+ 且不退。单次超阈值就降级会在正常波动时误伤
+    阈值刻意放宽：工具调用密集时短时出现几十个 in-flight 的 taskkill 是正常的，
+    真正雪崩是 200~300+ 且不退。单次超阈值就降级会在正常波动时误伤
     （2026-10-17 00:53 就是这么把 1 秒刷成 5 秒的）。
     """
     idle = 0
     strikes = 0
     while True:
-        time.sleep(30)
+        time.sleep(WATCH_INTERVAL_S)
         tk = proc_count("taskkill.exe")
+        if tk > 60:   # 正常波动一般 0~30；超过 60 说明开始挂了 → 立刻回收
+            reaped = reap_taskkills()
+            log(f"taskkill 挂住 {tk} 个 → 自动回收 {reaped} 个（抑制 CC 清理的副作用）")
+            tk = proc_count("taskkill.exe")
         if tk > 100:
             strikes += 1
             if strikes >= 2:
@@ -124,8 +160,30 @@ def watchdog():
         else:
             idle += 1
             if idle >= IDLE_EXIT_AFTER:
-                log(f"连续 {IDLE_EXIT_AFTER * 30 // 60} 分钟没见到 claude.exe，退出")
+                log(f"连续 {IDLE_EXIT_AFTER * WATCH_INTERVAL_S // 60} 分钟没见到 claude.exe，退出")
                 os._exit(0)
+
+
+def note_session(payload):
+    """记录活会话的工作目录：重启脚本靠它把窗口"原样"开回来。"""
+    global _LAST_SESS_SAVE
+    sid = str(payload.get("session_id") or "")
+    if not sid:
+        return
+    ws = payload.get("workspace") or {}
+    now = time.time()
+    SESSIONS[sid] = {
+        "cwd": ws.get("current_dir") or ws.get("cwd") or "",
+        "transcript": payload.get("transcript_path") or "",
+        "ts": now,
+    }
+    if now - _LAST_SESS_SAVE > 5:          # 每 5 秒最多落盘一次
+        _LAST_SESS_SAVE = now
+        try:
+            live = {k: v for k, v in SESSIONS.items() if now - (v.get("ts") or 0) < 600}
+            SESSIONS_FILE.write_text(json.dumps(live, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
 
 
 def handle(conn):
@@ -145,6 +203,9 @@ def handle(conn):
             payload = json.loads(raw)
         except Exception:
             payload = {}
+        if not isinstance(payload, dict):   # 收到 null/数组等非法载荷时别炸
+            payload = {}
+        note_session(payload)          # 记录活会话的工作目录（重启脚本用）
         with LOCK:                     # 多会话并发时串行渲染（每帧只要几十毫秒）
             MOD._AUTOCOMPACT = None    # settings.json 改了也立刻跟上
             line = MOD.render_line(payload)
