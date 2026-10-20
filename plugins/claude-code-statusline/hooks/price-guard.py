@@ -60,6 +60,11 @@ AUMID = "DeepSeekPriceGuard"  # Toast 左上角显示名（HKCU 注册，无需�
 HOME = pathlib.Path(os.path.expanduser("~"))
 OVERRIDE_FILE = HOME / ".claude" / ".dspg_override.json"
 DECISION_FILE = HOME / ".claude" / ".dspg_decision.json"
+LAST_DECISION_FILE = HOME / ".claude" / ".dspg_last_decision.json"
+MUTEX_NAME = "Local\\DSPG_Popup_Lock"   # 跨进程弹窗互斥：并发工具调用只弹一个窗
+DECISION_REUSE_SEC = 60                 # 刚做过决定（含超时=拒绝）→ 60 秒内复用，不再弹
+# 定时/唤醒类工具永远放行（详见 main）：被拦的话模型连"预约到空闲时段"都做不到
+SCHEDULING_TOOLS = ("CronCreate", "CronList", "CronDelete", "ScheduleWakeup")
 ACTION_PS1 = HOME / ".claude" / ".dspg_action.ps1"
 POPUP_PS1 = HOME / ".claude" / ".dspg_popup.ps1"
 BALANCE_CACHE = HOME / ".claude" / ".balance_cache.json"
@@ -192,13 +197,28 @@ def load_balance():
         return None
 
 
+_PAYLOAD = None
+
+
+def read_payload():
+    """读一次 hook 的 stdin JSON 并缓存（session_id / tool_name 等）。
+
+    ⚠️ stdin 只能读一次：处处 json.load(sys.stdin) 会互相吃掉数据。
+    """
+    global _PAYLOAD
+    if _PAYLOAD is None:
+        try:
+            _PAYLOAD = json.load(sys.stdin)
+        except Exception:
+            _PAYLOAD = {}
+        if not isinstance(_PAYLOAD, dict):
+            _PAYLOAD = {}
+    return _PAYLOAD
+
+
 def read_session_id():
     """从 hook stdin JSON 读 session_id；读不到返回 None"""
-    try:
-        data = json.load(sys.stdin)
-        return data.get("session_id")
-    except Exception:
-        return None
+    return read_payload().get("session_id")
 
 
 def check_override(session_id):
@@ -316,12 +336,17 @@ def ensure_popup_ps1():
 
 
 def show_popup(title, message):
-    """同步弹 Popup 等用户点击（脚本内最多等 POPUP_WAIT_SEC 秒），完成后返回。"""
+    """同步弹 Popup 等用户点击（脚本内最多等 POPUP_WAIT_SEC 秒），完成后返回。
+
+    超时只留 +3 秒余量：旧版这里是 +10，且之后 wait_decision 还再等 30 秒，
+    总计 60+ 秒 > hooks.json 的 45 秒超时 → CC 直接把 hook 杀掉，用户看到的是
+    "卡很久然后失败"（2026-10-20 用户报"窗口等待不会超时"）。
+    """
     try:
         subprocess.run(
             [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-File", str(POPUP_PS1), "-Title", title, "-Message", message],
-            timeout=POPUP_WAIT_SEC + 10,
+            timeout=POPUP_WAIT_SEC + 3,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -329,18 +354,79 @@ def show_popup(title, message):
         pass
 
 
+def _acquire_popup_mutex(timeout_ms):
+    """跨进程互斥：并发的多个工具调用只允许一个真正弹窗，其余排队。"""
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.CreateMutexW(None, False, MUTEX_NAME)
+        if not h:
+            return None
+        if k.WaitForSingleObject(h, int(timeout_ms)) == 0:   # WAIT_OBJECT_0
+            return h
+        k.CloseHandle(h)
+    except Exception:
+        pass
+    return None
+
+
+def _release_popup_mutex(h):
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.ReleaseMutex(h)
+        k.CloseHandle(h)
+    except Exception:
+        pass
+
+
+def _last_decision():
+    """最近 60 秒内是否已经做过决定（含超时=拒绝）→ 返回 "yes"/"no"/None。"""
+    try:
+        d = json.loads(LAST_DECISION_FILE.read_text(encoding="utf-8"))
+        if time.time() - d.get("ts", 0) <= DECISION_REUSE_SEC:
+            return d.get("result")
+    except Exception:
+        pass
+    return None
+
+
+def _remember_decision(ok):
+    try:
+        LAST_DECISION_FILE.write_text(
+            json.dumps({"ts": time.time(), "result": "yes" if ok else "no"}),
+            encoding="utf-8")
+    except Exception:
+        pass
+
+
 def ask_user(message, simulate=None):
     """弹 Popup 模态对话框并等待决策；返回 True=同意放行。
+
     simulate: "yes"/"no" 测试用；None=真实弹窗。
-    注：Toast 协议激活在未打包应用下失效（实测按钮/正文点击均不触发），
-    故交互走 WScript.Shell.Popup，100% 可靠。"""
+    并发安全：用命名互斥体串行化——同时触发的多个工具调用只会弹**一个**窗，
+    排队的实例复用刚刚的决定（60 秒内），不会再各弹各的。
+    """
     if simulate == "yes":
         return True
     if simulate == "no":
         return False
-    ensure_popup_ps1()
-    show_popup(POPUP_TITLE, message)
-    return wait_decision() == "yes"
+    mtx = _acquire_popup_mutex((POPUP_WAIT_SEC + 5) * 1000)
+    try:
+        if check_override(None):      # 排队期间别的实例可能已经拿到放行
+            return True
+        prev = _last_decision()       # 刚有人点过（或超时）→ 直接复用，不再弹窗
+        if prev is not None:
+            return prev == "yes"
+        ensure_popup_ps1()
+        show_popup(POPUP_TITLE, message)
+        # 弹窗进程退出前已把决策写盘，这里只要很短的宽限期（旧版又等 30 秒是 bug）
+        ok = wait_decision(timeout=3) == "yes"
+        _remember_decision(ok)
+        return ok
+    finally:
+        if mtx:
+            _release_popup_mutex(mtx)
 
 
 def block_message(balance_txt, reason="", now_dt=None, switch_dt=None):
@@ -393,6 +479,11 @@ def main():
     args = ap.parse_args()
 
     if os.environ.get("DSPG_BYPASS") == "1":
+        return 0
+
+    # 定时/唤醒类工具永远放行：被拦的话模型连"预约到空闲时段"都做不到，
+    # 而拦截文案恰恰在教它用 CronCreate 排期——不能自相矛盾（2026-10-20 用户报）。
+    if str(read_payload().get("tool_name") or "") in SCHEDULING_TOOLS:
         return 0
 
     if args.setup_only:
