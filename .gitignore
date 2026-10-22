@@ -11,5 +11,8 @@ __pycache__/
 plugins/*/scripts/dspg-status.exe
 plugins/*/scripts/dspg.env
 
+# 本地扩展（含主题色演示），不进正式版
+*_local.py
+
 # 改名等操作产生的备份
 *.bak-*

@@ -5,12 +5,16 @@ DeepSeek 峰谷定价 + 余额守护 hook（PreToolUse）
 
 功能：
 1. 高峰时段（北京时间 周一至周五 09:00-12:00、14:00-18:00，法定节假日全天
-   空闲）阻止工具调用；
-   首次拦截时弹 Popup 模态对话框（WScript.Shell.Popup）：
-   - 点「是」→ 临时放行本会话 30 分钟（~/.claude/.dspg_override.json）
-   - 点「否」/ 30 秒无响应 → 继续拦截
-   - 注：Windows Toast 的协议激活在未打包应用下失效（按钮/正文点击均
-     不触发，实测多次），故交互统一走 Popup，100% 可靠
+   空闲）阻止工具调用。询问方式由 ~/.claude/.dspg_config.json 的 popup_mode
+   决定（/claude-code-statusline:settings 可切换）：
+   - "tui"：hook 输出 permissionDecision="ask"，由 Claude Code
+     自己的权限对话框询问；选「允许」本次放行。hook 看不到用户选择，因此
+     每次被拦都会再问一次，不写 30 分钟放行状态
+   - "window"（默认）：弹 Popup 模态对话框（WScript.Shell.Popup）：
+       点「是」→ 临时放行本会话 30 分钟（~/.claude/.dspg_override.json）
+       点「否」/ 30 秒无响应 → 继续拦截
+     注：Windows Toast 的协议激活在未打包应用下失效（按钮/正文点击均
+     不触发，实测多次），故窗口交互走 Popup，100% 可靠
 2. 每次工具调用注入余额，低于阈值（¥5）输出省流警告
 3. 高峰前 15 分钟提前警告
 4. 拦截提示词携带当前时间、本段高峰剩余/结束时刻，并给出可直接使用的
@@ -39,6 +43,11 @@ import argparse
 import datetime
 import subprocess
 
+# 上一级 scripts/：多语言文案 + provider 识别
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "scripts"))
+import i18n  # noqa: E402
+import providers  # noqa: E402
+
 for stream in (sys.stdout, sys.stderr):
     try:
         stream.reconfigure(encoding="utf-8")
@@ -54,7 +63,6 @@ LOW_BALANCE = 5.0           # 余额低于此值（元）时每次工具调用�
 OVERRIDE_MIN = 30           # 临时放行时长（分钟）
 POPUP_WAIT_SEC = 30         # Popup 模态对话框等待秒数
 DECISION_TIMEOUT = 30       # 等待用户点击 Toast 的秒数，超时视为拒绝
-POPUP_TITLE = "DeepSeek 高峰拦截"
 AUMID = "DeepSeekPriceGuard"  # Toast 左上角显示名（HKCU 注册，无需管理员）
 
 HOME = pathlib.Path(os.path.expanduser("~"))
@@ -65,6 +73,15 @@ MUTEX_NAME = "Local\\DSPG_Popup_Lock"   # 跨进程弹窗互斥：并发工具�
 DECISION_REUSE_SEC = 60                 # 刚做过决定（含超时=拒绝）→ 60 秒内复用，不再弹
 # 定时/唤醒类工具永远放行（详见 main）：被拦的话模型连"预约到空闲时段"都做不到
 SCHEDULING_TOOLS = ("CronCreate", "CronList", "CronDelete", "ScheduleWakeup")
+CONFIG_FILE = HOME / ".claude" / ".dspg_config.json"      # 弹窗方式 / 刷新秒数
+HOOK_LOG = HOME / ".claude" / ".dspg_hook.log"            # 判定日志（每次调用一行）
+PAYLOAD_DUMP = HOME / ".claude" / ".dspg_hook_payload.json"   # 最近一次 hook 原始载荷
+PAYLOADS_JSONL = HOME / ".claude" / ".dspg_hook_payloads.jsonl"  # 追加留档（1MB 滚动）
+PROVIDER_FILE = HOME / ".claude" / ".dspg_provider.json"   # 状态栏每帧写的当前 provider
+TURN_CACHE_FILE = HOME / ".claude" / ".dspg_turn_cache.json"  # prompt_id → 是否定时回合
+DEFAULT_CONFIG = {"popup_mode": "window", "refresh_seconds": 1,
+                  "exempt_scheduled": True, "provider": "auto"}
+TRANSCRIPT_TAIL_BYTES = 4 << 20   # 判定「定时回合」只读 transcript 末尾 4MB
 ACTION_PS1 = HOME / ".claude" / ".dspg_action.ps1"
 POPUP_PS1 = HOME / ".claude" / ".dspg_popup.ps1"
 BALANCE_CACHE = HOME / ".claude" / ".balance_cache.json"
@@ -185,19 +202,63 @@ def fmt_duration(minutes):
 
 
 def peak_periods_text():
-    return "周一至周五（不含中国法定节假日）09:00-12:00 / 14:00-18:00（北京时间）"
+    return i18n.t("periods")
 
 
 def load_balance():
-    """读取余额缓存；失败返回 None"""
+    """读取余额缓存；缓存属于别的 provider 时返回 None（不拿别家余额算 DeepSeek）。"""
     try:
         data = json.loads(BALANCE_CACHE.read_text(encoding="utf-8"))
+        prov = data.get("provider")
+        if prov and prov != "deepseek":
+            return None
         return data.get("balance")
     except Exception:
         return None
 
 
 _PAYLOAD = None
+
+
+def hook_log(msg):
+    """判定日志：每次工具调用写一行（500KB 滚动清空）。排查「某类工具被拦」靠它。"""
+    try:
+        if HOOK_LOG.exists() and HOOK_LOG.stat().st_size > 500_000:
+            HOOK_LOG.write_text("", encoding="utf-8")
+        with HOOK_LOG.open("a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except Exception:
+        pass
+
+
+def load_config():
+    """读 ~/.claude/.dspg_config.json；缺失/损坏时用默认值。"""
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            for k in ("popup_mode", "refresh_seconds", "exempt_scheduled", "provider"):
+                if k in data:
+                    cfg[k] = data[k]
+    except Exception:
+        pass
+    return cfg
+
+
+def dump_payload():
+    """把 hook 原始载荷留档（最近一份 + 追加 JSONL），供排查用。
+
+    注意：载荷含 tool_input（可能有文件内容），文件在 ~/.claude 下、不进 git。
+    """
+    try:
+        PAYLOAD_DUMP.write_text(
+            json.dumps(_PAYLOAD, ensure_ascii=False, indent=2), encoding="utf-8")
+        if PAYLOADS_JSONL.exists() and PAYLOADS_JSONL.stat().st_size > 1_000_000:
+            PAYLOADS_JSONL.write_text("", encoding="utf-8")
+        with PAYLOADS_JSONL.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(_PAYLOAD, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 
 def read_payload():
@@ -213,7 +274,143 @@ def read_payload():
             _PAYLOAD = {}
         if not isinstance(_PAYLOAD, dict):
             _PAYLOAD = {}
+        dump_payload()
     return _PAYLOAD
+
+
+def log_decision(action, reason=""):
+    """一行判定日志：动作 工具 会话 原因。"""
+    p = read_payload()
+    hook_log(
+        f"{action:<5} tool={p.get('tool_name') or '?'} "
+        f"sid={str(p.get('session_id') or '-')[:8]} {reason}".rstrip()
+    )
+
+
+_TAIL_CACHE = None
+
+
+def _transcript_tail():
+    """读 transcript 末尾 4MB 的行（进程内缓存；找不到返回空列表）。"""
+    global _TAIL_CACHE
+    if _TAIL_CACHE is not None:
+        return _TAIL_CACHE
+    tp = read_payload().get("transcript_path")
+    if not tp:
+        _TAIL_CACHE = []
+        return _TAIL_CACHE
+    try:
+        fpath = pathlib.Path(tp)
+        size = fpath.stat().st_size
+        with fpath.open("rb") as f:
+            if size > TRANSCRIPT_TAIL_BYTES:
+                f.seek(size - TRANSCRIPT_TAIL_BYTES)
+                f.readline()      # 丢掉可能被截断的半行
+            _TAIL_CACHE = f.read().decode("utf-8", "replace").splitlines()
+    except Exception:
+        _TAIL_CACHE = []
+    return _TAIL_CACHE
+
+
+def _load_turn_cache():
+    try:
+        data = json.loads(TURN_CACHE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_turn_cache(cache):
+    try:
+        if len(cache) > 50:   # 只留最近 50 个 prompt，防无限增长
+            items = sorted(cache.items(), key=lambda kv: (kv[1] or {}).get("ts", 0))
+            cache = dict(items[-50:])
+        TURN_CACHE_FILE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def turn_is_scheduled():
+    """本回合是否由定时任务（CronCreate / ScheduleWakeup）触发。
+
+    2026-10-22 实测：CC 把定时任务注入成一条 user 消息，记录里带
+    turnOrigin="scheduled"、scheduledTaskId、promptSource="system"，且
+    promptId 与 hook 载荷的 prompt_id 相同；工具结果的 user 记录没有这些字段。
+    hook 载荷本身**没有**任何「本回合来源」字段，只能回读 transcript。
+
+    回合变长后那条 user 记录会被挤出尾部窗口，所以**按 prompt_id 缓存判定结果**
+    （`.dspg_turn_cache.json`），同一回合后续调用直接读缓存。
+    窗口内找不到记录 → 按普通回合处理（宁可拦，不可误放）。
+    """
+    pid = read_payload().get("prompt_id")
+    if not pid:
+        return False
+    cache = _load_turn_cache()
+    hit = cache.get(pid)
+    if isinstance(hit, dict) and "scheduled" in hit:
+        return bool(hit["scheduled"])
+    for line in reversed(_transcript_tail()):
+        if pid not in line:   # 快速过滤，绝大多数行走不到 json 解析
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if rec.get("promptId") != pid:
+            continue
+        # ⚠️ 同一 promptId 下还有大量「工具结果」user 记录（它们没有 turnOrigin），
+        # 倒序扫描会先撞上它们 → 必须跳过，只认本轮真正的用户消息（2026-10-22 实测）。
+        if rec.get("toolUseResult") is not None:
+            continue
+        if rec.get("type") != "user":
+            continue
+        verdict = bool(rec.get("turnOrigin") == "scheduled" or rec.get("scheduledTaskId"))
+        cache[pid] = {"scheduled": verdict, "ts": time.time()}
+        _save_turn_cache(cache)
+        return verdict
+    return False
+
+
+def last_model_from_transcript():
+    """transcript 里最后一条 assistant 响应的 model（大小写原样）。"""
+    for line in reversed(_transcript_tail()):
+        if '"model"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        if rec.get("type") != "assistant":
+            continue
+        model = (rec.get("message") or {}).get("model")
+        if model:
+            return str(model)
+    return ""
+
+
+def current_provider():
+    """当前 provider —— 决定要不要按 DeepSeek 峰谷价拦截。
+
+    顺序：配置显式指定 → 状态栏每帧写的 .dspg_provider.json（10 分钟内）→
+    ANTHROPIC_BASE_URL → transcript 里最后的模型名 → 兜底 DeepSeek。
+    """
+    cfg = str(load_config().get("provider") or "auto").lower()
+    if cfg != "auto" and cfg in providers.PROVIDERS:
+        return cfg
+    try:
+        d = json.loads(PROVIDER_FILE.read_text(encoding="utf-8"))
+        if time.time() - (d.get("ts") or 0) <= 600 and d.get("provider"):
+            return str(d["provider"])
+    except Exception:
+        pass
+    url = providers.base_url()
+    prov = providers.detect_provider("", url)
+    if prov != "unknown":
+        return prov
+    model = last_model_from_transcript()
+    if model:
+        return providers.detect_provider(model, url)
+    return "deepseek"   # 本插件本来就是 DeepSeek 守护，认不出时按 DeepSeek 处理
 
 
 def read_session_id():
@@ -419,7 +616,7 @@ def ask_user(message, simulate=None):
         if prev is not None:
             return prev == "yes"
         ensure_popup_ps1()
-        show_popup(POPUP_TITLE, message)
+        show_popup(i18n.t("popup.title"), message)
         # 弹窗进程退出前已把决策写盘，这里只要很短的宽限期（旧版又等 30 秒是 bug）
         ok = wait_decision(timeout=3) == "yes"
         _remember_decision(ok)
@@ -429,6 +626,25 @@ def ask_user(message, simulate=None):
             _release_popup_mutex(mtx)
 
 
+def emit_ask(reason):
+    """TUI 模式：把决策交回 CC 自己的原生权限对话框（permissionDecision=ask）。
+
+    CC 收到后弹它自己的询问 UI（不抢焦点、可键盘操作），用户选「允许」本次
+    调用放行、选「拒绝」则拒绝。注意：hook 在弹出对话框前就已退出，看不到
+    用户的选择，所以 TUI 模式**不写** 30 分钟放行状态——高峰里每次被拦都会
+    再问一次。想「点一次安静 30 分钟」请切到 window 模式（见 settings 命令）。
+    """
+    out = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask",
+            "permissionDecisionReason": reason,
+        }
+    }
+    sys.stdout.write(json.dumps(out, ensure_ascii=False))
+    sys.stdout.flush()
+
+
 def block_message(balance_txt, reason="", now_dt=None, switch_dt=None):
     """拦截提示词（注入模型的工具结果）。
 
@@ -436,35 +652,24 @@ def block_message(balance_txt, reason="", now_dt=None, switch_dt=None):
     模型可直接用 CronCreate(recurring=false) 精确定时到空闲时段继续任务；
     同理也直接告诉它几点解除拦截，避免模型靠猜。
     """
-    msg = (
-        "\n[deepseek-price-guard] 当前处于 DeepSeek 价格高峰时段（"
-        + peak_periods_text()
-        + "），价格为高峰价（空闲时段 5 折），当前余额 "
-        + balance_txt
-        + "。本次工具调用已被阻止。\n"
-    )
+    msg = "\n[deepseek-price-guard] " + i18n.t(
+        "block.head", periods=peak_periods_text(), balance=balance_txt) + "\n"
     cron_hint = ""
     if now_dt is not None and switch_dt is not None:
         # 剩余按 now 抹掉秒后算，与 main 里 peak_left 的分钟口径严格一致
         left_min = (switch_dt - now_dt.replace(second=0, microsecond=0)).total_seconds() / 60
         woke = switch_dt + datetime.timedelta(minutes=WAKE_AFTER_PEAK_MIN)
-        wd = "一二三四五六日"[now_dt.weekday()]
-        msg += (
-            f"时间信息（北京时间）：现在 {now_dt:%Y-%m-%d %H:%M}（周{wd}），"
-            f"本段高峰还剩 {fmt_duration(left_min)}，至 {switch_dt:%H:%M} 结束。\n"
-        )
-        cron_hint = (
-            f"，可直接用 cron 表达式 \"{woke.minute} {woke.hour} {woke.day} {woke.month} *\""
-            f"（recurring=false → {woke:%H:%M} 触发，即高峰结束后 {WAKE_AFTER_PEAK_MIN} 分钟）"
-        )
+        wd = i18n.WEEKDAYS.get(i18n.LANG, i18n.WEEKDAYS["en"])[now_dt.weekday()]
+        msg += i18n.t(
+            "block.time", now=f"{now_dt:%Y-%m-%d %H:%M}", weekday=wd,
+            left=fmt_duration(left_min), switch=f"{switch_dt:%H:%M}") + "\n"
+        cron_hint = i18n.t(
+            "block.cron", expr=f"{woke.minute} {woke.hour} {woke.day} {woke.month} *",
+            time=f"{woke:%H:%M}", after=WAKE_AFTER_PEAK_MIN)
     if reason:
         msg += reason + "\n"
-    msg += (
-        "请停止所有工作并结束本轮回复。如任务未完成，用 CronCreate 安排下一次"
-        "空闲时段的定时唤醒" + (cron_hint or "（建议下个高峰结束后约 5 分钟）")
-        + "，然后停止回复。\n"
-        "（如需临时放行：等弹窗出现时点「是」，或启动会话时设 DSPG_BYPASS=1 完全放行）\n"
-    )
+    msg += i18n.t("block.footer", cron=cron_hint or i18n.t("block.cron_default")) + "\n"
+    msg += i18n.t("block.hint") + "\n"
     return msg
 
 
@@ -479,16 +684,25 @@ def main():
     args = ap.parse_args()
 
     if os.environ.get("DSPG_BYPASS") == "1":
+        hook_log("pass  tool=- sid=- DSPG_BYPASS=1")
         return 0
 
     # 定时/唤醒类工具永远放行：被拦的话模型连"预约到空闲时段"都做不到，
     # 而拦截文案恰恰在教它用 CronCreate 排期——不能自相矛盾（2026-10-20 用户报）。
     if str(read_payload().get("tool_name") or "") in SCHEDULING_TOOLS:
+        log_decision("pass", "scheduling-tool")
         return 0
 
     if args.setup_only:
         ensure_action_ps1()
         ensure_protocols()
+        return 0
+
+    # 只有 DeepSeek 有峰谷价：用 Kimi / Claude / Gemini / GLM 等端点时一律不拦
+    # （provider 由 状态栏写的 .dspg_provider.json → BASE_URL → transcript 模型名判定）
+    provider = current_provider()
+    if not providers.is_peak_pricing(provider):
+        log_decision("pass", f"provider={provider} (no peak pricing)")
         return 0
 
     if args.now:
@@ -515,48 +729,65 @@ def main():
         to_peak = minutes_to_next_peak(h, m, d)
         if to_peak <= WARN_BEFORE_MIN:
             sys.stderr.write(
-                f"\n[deepseek-price-guard] 距 DeepSeek 价格高峰还有约 {to_peak} 分钟"
-                f"（高峰时段 {peak_periods_text()}，价格翻倍），当前余额 {balance_txt}。"
-                "请尽快收尾当前任务；未完成的大任务建议暂停，安排到空闲时段继续。\n"
+                "\n[deepseek-price-guard] " + i18n.t(
+                    "warn.near", minutes=to_peak, periods=peak_periods_text(),
+                    balance=balance_txt) + "\n"
             )
+            log_decision("pass", f"off-peak near-peak({to_peak}m)")
             return 0
         if balance is not None and balance < LOW_BALANCE:
             sys.stderr.write(
-                f"\n[deepseek-price-guard] DeepSeek 余额仅 {balance_txt}"
-                f"（低于 ¥{LOW_BALANCE:.2f}）。请省着用：\n"
-                "- 精简回复输出，避免冗余内容\n"
-                "- 合并小工具调用为一次，避免重复读取大文件\n"
-                "- 能本地完成的操作不调外部 API\n"
-                "- 必要时提醒用户充值\n"
+                "\n[deepseek-price-guard] " + i18n.t(
+                    "warn.low", balance=balance_txt, threshold=f"{LOW_BALANCE:.2f}") + "\n"
             )
+        log_decision("pass", "off-peak")
         return 0
 
-    # ---- 高峰：放行检查 → 弹窗决策 ----
+    # ---- 高峰：放行检查 → 询问决策 ----
     if check_override(session_id):
+        log_decision("pass", "peak override")
         return 0  # 已放行，静默
+
+    # 定时任务触发的回合整轮放行：排期本身就是用户的选择，到点触发时不该再被拦。
+    # 依据 transcript 的 turnOrigin="scheduled"（详见 turn_is_scheduled）。
+    if load_config().get("exempt_scheduled", True) and turn_is_scheduled():
+        log_decision("pass", "peak scheduled-turn")
+        return 0
 
     peak_left_min = minutes_to_next_switch(h, m, d)
     peak_left = fmt_duration(peak_left_min)
     switch_dt = now_dt.replace(second=0, microsecond=0) + datetime.timedelta(minutes=peak_left_min)
-    popup_msg = (
-        f"DeepSeek 价格高峰时段（{peak_periods_text()}），价格翻倍（空闲 5 折）。\n"
-        f"本段高峰还剩 {peak_left}（至 {switch_dt:%H:%M} 结束），结束后自动解除拦截。\n"
-        f"当前余额 {balance_txt}。\n\n"
-        f"点击「是」临时放行 {OVERRIDE_MIN} 分钟；"
-        "点「否」或等待 = 拒绝"
+    mode = load_config().get("popup_mode") or "window"
+    msg_tail = "\n\n" + (
+        i18n.t("window.tail", minutes=OVERRIDE_MIN) if mode == "window"
+        else i18n.t("tui.tail")
     )
+    popup_msg = (
+        i18n.t("peak.body", periods=peak_periods_text()) + "\n"
+        + i18n.t("peak.left", left=peak_left, switch=f"{switch_dt:%H:%M}") + "\n"
+        + i18n.t("balance.line", balance=balance_txt) + msg_tail
+    )
+    if args.simulate_popup is not None:
+        mode = "window"    # 测试开关优先：模拟按钮结果只对窗口模式有意义
+    if mode == "tui":
+        # 交给 CC 自己的权限对话框；hook 已退出，看不到用户的选择
+        emit_ask(popup_msg)
+        log_decision("ask", "peak tui")
+        return 0
     ok = ask_user(popup_msg, simulate=args.simulate_popup)
 
     if ok:
         write_override(session_id, OVERRIDE_MIN)
+        log_decision("pass", f"peak approved {OVERRIDE_MIN}min")
         sys.stderr.write(
-            f"\n[deepseek-price-guard] 用户同意临时放行 {OVERRIDE_MIN} 分钟"
-            f"（至 {datetime.datetime.now(TZ).strftime('%H:%M')} 后）。"
-            "本次工具调用放行。\n"
+            "\n[deepseek-price-guard] " + i18n.t(
+                "approve.msg", minutes=OVERRIDE_MIN,
+                until=datetime.datetime.now(TZ).strftime("%H:%M")) + "\n"
         )
         return 0
     else:
-        sys.stderr.write(block_message(balance_txt, "（用户拒绝了放行或等待超时）", now_dt, switch_dt))
+        log_decision("block", "peak denied/timeout")
+        sys.stderr.write(block_message(balance_txt, i18n.t("deny.reason"), now_dt, switch_dt))
         return 2
 
 

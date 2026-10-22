@@ -27,6 +27,18 @@ import pathlib
 import subprocess
 import urllib.request
 
+# 同目录的 i18n 模块（daemon 通过 importlib 从文件加载本脚本时不会自动加 sys.path）
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import i18n  # noqa: E402      多语言文案：跟随系统显示语言，默认英语
+import providers  # noqa: E402 主流 provider：识别 / 余额 / 价格表
+
+# 可选本地扩展：同目录存在 theme_demo_local.py 时，由它接管模型段渲染。
+# 该文件不进版本库（.gitignore 的 *_local.py），正式版不包含任何演示逻辑。
+try:
+    import theme_demo_local
+except Exception:
+    theme_demo_local = None
+
 # Windows 管道重定向时默认 GBK，emoji 会崩 → 两条流都强制 UTF-8
 for stream in (sys.stdout, sys.stderr):
     try:
@@ -38,11 +50,22 @@ CACHE_FILE = pathlib.Path(os.path.expanduser("~/.claude/.balance_cache.json"))
 BALANCE_TTL = 30  # 秒：余额缓存多旧才去联网刷新（渲染路径不联网，见 get_balance）
 OVERRIDE_FILE = pathlib.Path(os.path.expanduser("~/.claude/.dspg_override.json"))
 STDIN_DUMP = pathlib.Path(os.path.expanduser("~/.claude/.dspg_stdin.json"))
+PROVIDER_FILE = pathlib.Path(os.path.expanduser("~/.claude/.dspg_provider.json"))
 TOKEN_CACHE = pathlib.Path(os.path.expanduser("~/.claude/.dspg_token_stats.json"))
 TOKEN_CACHE_VERSION = 3  # 缓存格式版本，改字段就 +1（不匹配会触发全量重扫）
 TZ = datetime.timezone(datetime.timedelta(hours=8))
+CONFIG_FILE = pathlib.Path(os.path.expanduser("~/.claude/.dspg_config.json"))
 
 _STDIN_CACHE = None
+
+
+def load_config():
+    """读 ~/.claude/.dspg_config.json（每帧读一次，改设置即时生效）。"""
+    try:
+        data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 _NO_DUMP = False  # daemon 模式（render_line）置 True：别每帧重写 stdin 留档
 
 # ANSI 颜色：高峰橙（加粗，256 色 208=#ff8700 纯橙）、低谷绿、放行 <1min 黄色警示
@@ -115,6 +138,30 @@ def _ansi_rgb(rgb):
         return f"\033[38;2;{rgb[0]};{rgb[1]};{rgb[2]}m"
     q = lambda c: min(range(6), key=lambda i: abs(_CUBE6[i] - c))
     return f"\033[38;5;{16 + 36 * q(rgb[0]) + 6 * q(rgb[1]) + q(rgb[2])}m"
+
+
+def _hex_rgb(value):
+    """'#4D6BFE' → (77, 107, 254)。"""
+    s = str(value).lstrip("#")
+    return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+
+
+def themed_text(text, provider, enabled=True):
+    """模型名静态显示：统一用纯色底色（该 provider 的主品牌色）。
+
+    动效（移动高光/多种配色）由本地扩展 theme_demo_local.py 叠加；
+    enabled=False（`.dspg_config.json` 的 model_theme=false）→ 原样返回。
+    """
+    if not enabled or not text:
+        return text
+    stops = providers.THEMES.get(provider) or []
+    if not stops:
+        return text
+    try:
+        rgb = _hex_rgb(stops[0])
+    except Exception:
+        return text
+    return _ansi_rgb(rgb) + text + RESET
 
 
 def warn_rgb(value, warn_at, crit_at):
@@ -295,28 +342,48 @@ def load_holidays():
     return _HOLIDAYS_CACHE
 
 
-def get_api_key():
-    key = os.environ.get("DEEPSEEK_API_KEY")
-    if key:
-        return key
+def current_model(payload=None):
+    """当前模型名（display_name 优先，退回 id）。"""
+    model = (payload if payload is not None else read_stdin_payload()).get("model") or {}
+    return str(model.get("display_name") or model.get("id") or "")
+
+
+def detect_current_provider(payload=None):
+    """当前 provider：模型名 → ANTHROPIC_BASE_URL（见 providers.detect_provider）。"""
+    return providers.detect_provider(current_model(payload), providers.base_url())
+
+
+def get_api_key(provider="deepseek"):
+    """按 provider 取 key（环境变量 → settings env → 当前 CC token）。"""
+    return providers.get_api_key(provider)
+
+
+def fetch_balance(key, provider="deepseek"):
+    """按 provider 查余额；不支持/失败返回 None。"""
+    return providers.fetch_balance(provider, key)
+
+
+_LAST_PROVIDER_WRITE = 0.0
+_LAST_PROVIDER_SIG = None
+
+
+def write_provider_file(provider, model):
+    """把当前 provider/model 写给价格守护 hook（hook 载荷里没有模型信息）。
+
+    每帧都写太浪费，签名不变时 30 秒才刷新一次 ts（hook 用 10 分钟新鲜度判断）。
+    """
+    global _LAST_PROVIDER_WRITE, _LAST_PROVIDER_SIG
+    sig = (provider, model, providers.base_url())
+    now = time.time()
+    if sig == _LAST_PROVIDER_SIG and now - _LAST_PROVIDER_WRITE < 30:
+        return
     try:
-        cfg_path = pathlib.Path(os.path.expanduser("~/.claude/settings.json"))
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-        return cfg.get("env", {}).get("ANTHROPIC_AUTH_TOKEN")
+        PROVIDER_FILE.write_text(json.dumps({
+            "provider": provider, "model": model, "base_url": sig[2], "ts": int(now),
+        }, ensure_ascii=False), encoding="utf-8")
+        _LAST_PROVIDER_SIG, _LAST_PROVIDER_WRITE = sig, now
     except Exception:
-        return None
-
-
-def fetch_balance(key):
-    req = urllib.request.Request(
-        "https://api.deepseek.com/user/balance",
-        headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
-    )
-    with urllib.request.urlopen(req, timeout=8) as r:
-        data = json.loads(r.read().decode("utf-8"))
-    if data.get("balance_infos"):
-        return sum(float(b.get("total_balance", 0)) for b in data["balance_infos"])
-    return None
+        pass
 
 
 def is_peak(h, m, d=None):
@@ -378,23 +445,29 @@ def load_cache():
         return None
 
 
-def fetch_and_store():
-    """联网取余额并写缓存；成功返回余额，失败返回 None。"""
-    key = get_api_key()
+def fetch_and_store(provider=None):
+    """联网取余额并写缓存；成功返回余额，失败返回 None。
+
+    缓存带 provider：换了模型/端点后旧缓存自动作废，不会把别家的余额当成本家的。
+    """
+    provider = provider or detect_current_provider()
+    key = get_api_key(provider)
     if not key:
         return None
-    try:
-        balance = fetch_balance(key)
-    except Exception:
+    data = fetch_balance(key, provider)
+    if not data:
         return None
     try:
-        CACHE_FILE.write_text(json.dumps({"ts": time.time(), "balance": balance}), encoding="utf-8")
+        CACHE_FILE.write_text(json.dumps({
+            "ts": time.time(), "provider": provider,
+            "balance": data.get("balance"), "currency": data.get("currency"),
+        }), encoding="utf-8")
     except Exception:
         pass
-    return balance
+    return data.get("balance")
 
 
-def spawn_balance_refresh(cached, now):
+def spawn_balance_refresh(cached, now, provider):
     """起一个**分离**的后台进程去联网刷新余额缓存（不等它、20 秒内不重复起）。
 
     渲染路径不联网的意义：每次渲染耗时都稳定，不会出现"网络卡一下把这一帧拖过
@@ -408,7 +481,8 @@ def spawn_balance_refresh(cached, now):
         pass
     try:
         subprocess.Popen(
-            [sys.executable, "-X", "utf8", str(pathlib.Path(__file__).resolve()), "--refresh-balance"],
+            [sys.executable, "-X", "utf8", str(pathlib.Path(__file__).resolve()),
+             "--refresh-balance", provider],
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=0x08000000 | 0x00000008,  # CREATE_NO_WINDOW | DETACHED_PROCESS
             close_fds=True)
@@ -416,19 +490,23 @@ def spawn_balance_refresh(cached, now):
         pass
 
 
-def get_balance(force=False):
+def get_balance(force=False, provider=None):
     """读余额：**渲染路径只读本地缓存、绝不联网**；缓存过期就起后台进程去刷。
 
     force=True（`--refresh`，给 /balance 命令用）时才阻塞联网拿最新值。
+    provider 变了（换模型/换端点）→ 旧缓存作废，重新刷。
     """
+    provider = provider or detect_current_provider()
     cached = load_cache()
+    if cached and cached.get("provider") and cached["provider"] != provider:
+        cached = None
     now = time.time()
-    age = now - (cached.get("ts") or 0)
+    age = now - ((cached or {}).get("ts") or 0)
     if force:
-        return fetch_and_store() or (cached.get("balance") if cached else None)
+        return fetch_and_store(provider) or ((cached or {}).get("balance"))
     if cached is None or age > BALANCE_TTL:
-        spawn_balance_refresh(cached, now)
-    return cached.get("balance") if cached else None
+        spawn_balance_refresh(cached, now, provider)
+    return (cached or {}).get("balance")
 
 
 def read_stdin_payload():
@@ -642,23 +720,24 @@ def fmt_tokens(n):
 
 
 def get_usage_stats(payload):
-    """返回 (平均 tok/s, 本会话总 tokens, API 调用次数, 全会话缓存命中率)。
+    """返回 (平均 tok/s, 本会话总 tokens, API 调用次数, 全会话缓存命中率, 段内轮数, usage 原始字典)。
 
     tok/s 分子用 output tokens，分母用 Claude Code 累计 API 等待时间
     cost.total_api_duration_ms——用 API 耗时而非墙钟，因为墙钟里混着工具执行和
     等人输入的时间，会把速度摊薄。
 
     命中率按全会话累计算（cache_read / 全部输入），与"会话总 tokens"同一口径。
+    最后一项 usage 原始字典用于按价格表估算花费（in/cr/out 分档计价）。
     """
     tpath = payload.get("transcript_path")
     if not tpath:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     api_ms = (payload.get("cost") or {}).get("total_api_duration_ms") or 0
     u = scan_transcript_usage(pathlib.Path(tpath))
     rate = u["out"] / (api_ms / 1000.0) if (api_ms > 0 and u["out"] > 0) else None
     denom = u["in"] + u["cr"]
     hit = u["cr"] / denom if denom > 0 else None
-    return rate, (u["total"] or None), (u["calls"] or None), hit, u["seg_calls"]
+    return rate, (u["total"] or None), (u["calls"] or None), hit, u["seg_calls"], u
 
 
 def main(argv=None):
@@ -668,16 +747,22 @@ def main(argv=None):
     ap.add_argument("--now", help="测试用：伪造当前时间 HH:MM")
     ap.add_argument("--date", help="测试用：伪造日期 YYYY-MM-DD")
     ap.add_argument("--balance", type=float, help="测试用：伪造余额（元），不联网")
-    ap.add_argument("--refresh-balance", action="store_true",
-                    help="内部：联网刷新余额缓存后退出（状态栏的后台刷新进程用）")
+    ap.add_argument("--refresh-balance", nargs="?", const="auto",
+                    help="内部：联网刷新余额缓存后退出（可指定 provider）")
     args = ap.parse_args(argv)
 
     if args.refresh_balance:  # 后台刷新进程：只干这一件事就退出
-        fetch_and_store()
+        fetch_and_store(None if args.refresh_balance == "auto" else args.refresh_balance)
         return 0
 
+    payload = read_stdin_payload()
+    provider = detect_current_provider(payload)
+    model_name = current_model(payload)
+    write_provider_file(provider, model_name)
+
     # --balance 只改显示用的余额，不落缓存、不联网（演示/预览余额配色用）
-    balance = args.balance if args.balance is not None else get_balance(force=args.refresh)
+    balance = (args.balance if args.balance is not None
+               else get_balance(force=args.refresh, provider=provider))
     nowdt = datetime.datetime.now(TZ)
     h, m = nowdt.hour, nowdt.minute
     if args.now:
@@ -687,18 +772,24 @@ def main(argv=None):
     remain = minutes_to_next_switch(h, m, d)
     # 秒级精度：分钟数 ×60 再扣掉当前秒（--now 伪时间时按整分算）
     remain_sec = remain * 60 - (0 if args.now else nowdt.second)
-    payload = read_stdin_payload()
     tier = get_model_tier(payload)
     hit = get_cache_hit_ratio(payload)
-    rate, session_tokens, api_calls, hit_session, seg_calls = get_usage_stats(payload)
+    rate, session_tokens, api_calls, hit_session, seg_calls, usage_stats = get_usage_stats(payload)
     if hit_session is not None:
-        hit = hit_session  # 全会话平均，胜过 prompt_cache 的"最近一小段"口径
+        hit = hit_session
+    # 会话花费：按当前 provider/模型的价格表估算（DeepSeek 自动区分高峰/空闲单价）
+    cost = providers.estimate_cost(provider, model_name, usage_stats, peak)  # 全会话平均，胜过 prompt_cache 的"最近一小段"口径
 
     if args.json:
         print(json.dumps({
             "balance": balance,
+            "provider": provider,
+            "provider_name": providers.provider_name(provider),
+            "model": model_name,
+            "session_cost": cost,
+            "session_cost_currency": (providers.PROVIDERS.get(provider) or {}).get("currency"),
             "peak": peak,
-            "peak_periods": "周一至周五（不含法定节假日）09:00-12:00 / 14:00-18:00",
+            "peak_periods": i18n.t("periods"),
             "is_holiday": d in load_holidays(),
             "period_remaining_minutes": remain,
             "period_remaining_seconds": remain_sec,
@@ -716,11 +807,15 @@ def main(argv=None):
     blink = load_blink_state(sid)
 
     remain_txt = fmt_countdown(remain_sec)
-    tag_txt = (
-        f"{ORANGE}梁文峰 {remain_txt}{RESET}"
-        if peak
-        else f"{GREEN}梁文谷 {remain_txt}{RESET}"
-    )
+    # 峰谷倒计时只对「有峰谷定价」的 provider（目前只有 DeepSeek）显示；
+    # Kimi / Claude / Gemini / GLM 等一律隐藏（用户 2026-10-22 要求）。
+    tag_txt = ""
+    if providers.is_peak_pricing(provider):
+        tag_txt = (
+            f"{ORANGE}{i18n.t('peak.name')} {remain_txt}{RESET}"
+            if peak
+            else f"{GREEN}{i18n.t('valley.name')} {remain_txt}{RESET}"
+        )
 
     def fmt_mmss(seconds):
         s = max(0, int(seconds))
@@ -732,23 +827,37 @@ def main(argv=None):
         ov = json.loads(OVERRIDE_FILE.read_text(encoding="utf-8"))
         remaining = ov.get("expires", 0) - time.time()
         if remaining > 0:
-            countdown = f"放行{fmt_mmss(remaining)}"
+            countdown = i18n.t("override", time=fmt_mmss(remaining))
             if remaining < 60:
                 countdown = YELLOW + countdown + RESET
     except Exception:
         pass
 
     # 余额：¥1 起转黄、¥0 转红；刚进入警告态时闪 3 次（见 decorate）
+    sym = providers.symbol(provider)
     if balance is not None:
         shown = round(balance, 2)   # 按「显示值」判警戒，免得显示没变却在闪
-        balance_txt = decorate(f"¥{balance:.2f}",
+        balance_txt = decorate(f"{sym}{balance:.2f}",
                                warn_rgb(shown, BALANCE_YELLOW_AT, BALANCE_RED_AT),
                                "balance", blink)
-        core = f"{balance_txt} · {tag_txt}"
     else:
-        core = f"余额N/A · {tag_txt}"
-    if tier:
-        core = f"{tier} · {core}"
+        balance_txt = i18n.t("no_balance")
+    # 模型段：当前模型名，按品牌主题色上色（model_theme=false 可关）；
+    # 高价档（opus/sonnet）额外加红色 ◆ 警示
+    disp_model = model_name if len(model_name) <= 24 else model_name[:23] + "…"
+    cfg = load_config()
+    use_theme = cfg.get("model_theme", True) is not False
+    model_txt = themed_text(disp_model, provider, enabled=use_theme)
+    if theme_demo_local is not None:      # 本地扩展（正式版没有这个文件）
+        try:
+            custom = theme_demo_local.decorate(disp_model, provider, cfg)
+            if custom:
+                model_txt = custom
+        except Exception:
+            pass
+    if tier and disp_model:
+        model_txt = f"{RED}◆{RESET}" + model_txt
+    core = " · ".join(p for p in (model_txt, balance_txt, tag_txt) if p)
 
     # 用量段：缓存命中率 + 「当前上下文 × 轮数」+ 平均生成速度
     # 用乘积而不是会话累计总量：单看 162M 会和 CC 底部 `/clear to save 439k` 打架，
@@ -759,7 +868,7 @@ def main(argv=None):
         hit_txt = decorate(f"{hit * 100:.1f}%",
                            warn_rgb(shown, CACHE_WARN_PCT, CACHE_RED_PCT),  # <95% 黄 → ≤90% 红
                            "cache", blink)
-        usage.append(f"缓存{hit_txt}")
+        usage.append(i18n.t("cache", value=hit_txt))
     ctx = (payload.get("context_window") or {}).get("total_input_tokens")
     if ctx and seg_calls:
         # 上下文：色阶分母 = 自动压缩阈值（离压缩多远），≥90% 才闪。
@@ -773,6 +882,9 @@ def main(argv=None):
                             warn_rgb(shown, RATE_WARN_TPS, RATE_RED_TPS),  # <150 黄 → ≤100 红
                             "rate", blink)
         usage.append(rate_txt)
+    # 会话花费（只有价格表里有该模型时才显示）
+    if cost is not None and cost > 0:
+        usage.append(i18n.t("cost", value=f"{sym}{cost:.2f}"))
     if usage:
         core = f"{core} · " + " · ".join(usage)
 

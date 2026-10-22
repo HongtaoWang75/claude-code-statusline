@@ -10,7 +10,8 @@
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/hooks/price-guard.py"
             ],
-            "timeout": 45
+            "timeout": 45,
+            "onFailure": "block"
           }
         ]
       }
