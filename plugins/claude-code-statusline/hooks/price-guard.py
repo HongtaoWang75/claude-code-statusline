@@ -9,7 +9,7 @@ DeepSeek 峰谷定价 + 余额守护 hook（PreToolUse）
    - 提示文字下方是放行时长下拉菜单（默认「放行一次」，另有 1/3/5/10/20/30/60
      分钟、放行本次高峰期）
    - 点「是」按所选时长放行；点「否」/ 30 秒无响应 → 继续拦截
-   - 窗口图标用插件内打包的 assets/claude.ico
+   - 窗口图标用插件内打包的 assets/claude-light.ico（黑）/ claude-dark.ico（白），按系统深浅色选择
 2. 每次工具调用注入余额，低于阈值（¥5）输出省流警告
 3. 高峰前 15 分钟提前警告
 4. 拦截提示词携带当前时间、本段高峰剩余/结束时刻，并给出可直接使用的
@@ -77,7 +77,8 @@ DEFAULT_CONFIG = {"refresh_seconds": 1, "exempt_scheduled": True, "provider": "a
 TRANSCRIPT_TAIL_BYTES = 4 << 20   # 判定「定时回合」只读 transcript 末尾 4MB
 ACTION_PS1 = HOME / ".claude" / ".dspg_action.ps1"
 POPUP_PS1 = HOME / ".claude" / ".dspg_popup.ps1"
-ICON_FILE = pathlib.Path(__file__).resolve().parent.parent / "assets" / "claude.ico"
+ICON_LIGHT = pathlib.Path(__file__).resolve().parent.parent / "assets" / "claude-light.ico"  # 黑色（浅色模式）
+ICON_DARK = pathlib.Path(__file__).resolve().parent.parent / "assets" / "claude-dark.ico"    # 白色（深色模式）
 
 # 窗口下拉菜单：minutes = 0 放行一次；>0 放行 N 分钟；-1 = 放行到本段高峰结束
 ALLOW_CHOICES = [
@@ -538,57 +539,192 @@ def wait_decision(timeout=DECISION_TIMEOUT):
 
 
 def ensure_popup_ps1():
-    """写弹窗脚本：WinForms 对话框（提示文字 + 放行时长下拉菜单 + 是/否）。幂等。"""
-    items = ", ".join("'" + label.replace("'", "''") + "'" for _, label in ALLOW_CHOICES)
+    """写弹窗脚本：WPF 对话框（跟随系统深/浅色 + 放行时长下拉菜单 + 是/否）。幂等。"""
+    items = "\n".join(
+        '      <ComboBoxItem Content="%s"%s/>' % (
+            label, ' IsSelected="True"' if i == 0 else "")
+        for i, (_, label) in enumerate(ALLOW_CHOICES)
+    )
     minutes = ", ".join(str(m) for m, _ in ALLOW_CHOICES)
-    ps1 = """# DSPG popup - WinForms dialog: message + allow-duration dropdown
-param([string]$Title, [string]$Message, [string]$Icon, [int]$WaitSec)
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$form = New-Object System.Windows.Forms.Form
-$form.Text = $Title
-$form.StartPosition = 'CenterScreen'
-$form.TopMost = $true
-$form.FormBorderStyle = 'FixedDialog'
-$form.MaximizeBox = $false
-$form.MinimizeBox = $false
-$form.ShowInTaskbar = $true
-$form.ClientSize = New-Object System.Drawing.Size(600, 260)
-try { $form.Icon = New-Object System.Drawing.Icon($Icon) } catch { }
-$label = New-Object System.Windows.Forms.Label
-$label.Text = $Message
-$label.AutoSize = $false
-$label.Location = New-Object System.Drawing.Point(16, 14)
-$label.Size = New-Object System.Drawing.Size(568, 156)
-$form.Controls.Add($label)
-$combo = New-Object System.Windows.Forms.ComboBox
-$combo.DropDownStyle = 'DropDownList'
-$combo.Location = New-Object System.Drawing.Point(16, 178)
-$combo.Size = New-Object System.Drawing.Size(320, 26)
-[void]$combo.Items.AddRange(@(%s))
-$combo.SelectedIndex = 0
-$form.Controls.Add($combo)
-$ok = New-Object System.Windows.Forms.Button
-$ok.Text = '是'
-$ok.DialogResult = 'OK'
-$ok.Location = New-Object System.Drawing.Point(396, 214)
-$ok.Size = New-Object System.Drawing.Size(90, 28)
-$form.Controls.Add($ok)
-$no = New-Object System.Windows.Forms.Button
-$no.Text = '否'
-$no.DialogResult = 'Cancel'
-$no.Location = New-Object System.Drawing.Point(494, 214)
-$no.Size = New-Object System.Drawing.Size(90, 28)
-$form.Controls.Add($no)
-$form.AcceptButton = $ok
-$form.CancelButton = $no
-$timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = [Math]::Max(1, $WaitSec) * 1000
-$timer.Add_Tick({ $timer.Stop(); $form.DialogResult = 'Cancel'; $form.Close() })
-$timer.Start()
-$result = $form.ShowDialog()
+    ps1 = """# DSPG popup - WPF dialog, follows system light/dark theme
+param([string]$Title, [string]$Message, [string]$IconLight, [string]$IconDark, [int]$WaitSec, [string]$Theme = 'auto')
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class DspgDark {
+  [DllImport("dwmapi.dll")] public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+}
+"@
+
+$dark = $false
+if ($Theme -eq 'light') {
+  $dark = $false
+} elseif ($Theme -eq 'dark') {
+  $dark = $true
+} else {
+  try {
+    $pers = Get-ItemProperty -Path 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize' -Name AppsUseLightTheme -ErrorAction Stop
+    $dark = ($pers.AppsUseLightTheme -eq 0)
+  } catch { }
+}
+
+if ($dark) {
+  $bg = '#1E1E1E'; $fg = '#ECECEC'; $panel = '#2B2B2B'; $border = '#3C3C3C'
+  $hover = '#3A3A3A'; $pressed = '#454545'; $sel = '#2F5DB3'; $arrow = '#B0B0B0'
+} else {
+  $bg = '#FAF9F5'; $fg = '#1F1F1F'; $panel = '#FFFFFF'; $border = '#D9D6CE'
+  $hover = '#EFEDE6'; $pressed = '#E3E0D8'; $sel = '#2F5DB3'; $arrow = '#6B6B6B'
+}
+
+$xaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="DeepSeek" Width="640" SizeToContent="Height"
+        WindowStartupLocation="CenterScreen" Topmost="True"
+        Background="$bg" Foreground="$fg"
+        FontFamily="Microsoft YaHei UI" FontSize="13" ResizeMode="NoResize">
+  <Window.Resources>
+    <Style x:Key="DarkButton" TargetType="Button">
+      <Setter Property="Background" Value="$panel"/>
+      <Setter Property="Foreground" Value="$fg"/>
+      <Setter Property="BorderBrush" Value="$border"/>
+      <Setter Property="Height" Value="34"/>
+      <Setter Property="Padding" Value="18,0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="1" CornerRadius="6">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="$hover"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="$pressed"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="DarkCombo" TargetType="ComboBox">
+      <Setter Property="Height" Value="34"/>
+      <Setter Property="Background" Value="$panel"/>
+      <Setter Property="Foreground" Value="$fg"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBox">
+            <Grid>
+              <ToggleButton x:Name="Toggle" Focusable="False" ClickMode="Press" Foreground="$fg"
+                            IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                <ToggleButton.Template>
+                  <ControlTemplate TargetType="ToggleButton">
+                    <Border Background="$panel" BorderBrush="$border" BorderThickness="1" CornerRadius="6">
+                      <Grid>
+                        <ContentPresenter Margin="12,0,32,0" VerticalAlignment="Center"
+                                          TextElement.Foreground="{TemplateBinding Foreground}"
+                                          Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType=ComboBox}}"/>
+                        <Path HorizontalAlignment="Right" Margin="0,0,12,0" VerticalAlignment="Center"
+                              Data="M 0 0 L 9 0 L 4.5 5 Z" Fill="$arrow"/>
+                      </Grid>
+                    </Border>
+                  </ControlTemplate>
+                </ToggleButton.Template>
+              </ToggleButton>
+              <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom"
+                     AllowsTransparency="True" PopupAnimation="Fade">
+                <Border Background="$panel" BorderBrush="$border" BorderThickness="1" CornerRadius="6" Margin="0,4,0,0">
+                  <ItemsPresenter/>
+                </Border>
+              </Popup>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Setter Property="ItemContainerStyle">
+        <Setter.Value>
+          <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="$fg"/>
+            <Setter Property="Template">
+              <Setter.Value>
+                <ControlTemplate TargetType="ComboBoxItem">
+                  <Border x:Name="Bd" Background="Transparent" Padding="12,8" CornerRadius="4" Margin="4,2">
+                    <ContentPresenter/>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsHighlighted" Value="True">
+                      <Setter TargetName="Bd" Property="Background" Value="$hover"/>
+                    </Trigger>
+                    <Trigger Property="IsSelected" Value="True">
+                      <Setter TargetName="Bd" Property="Background" Value="$sel"/>
+                    </Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </Setter.Value>
+            </Setter>
+          </Style>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+  <StackPanel Margin="24">
+    <TextBlock x:Name="Msg" TextWrapping="Wrap" FontSize="14" LineHeight="23" Foreground="$fg"/>
+    <ComboBox x:Name="Choice" Style="{StaticResource DarkCombo}" Margin="0,18,0,0">
+%s
+    </ComboBox>
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+      <Button x:Name="Yes" Content="是" Width="96" Style="{StaticResource DarkButton}" Margin="0,0,10,0"/>
+      <Button x:Name="No" Content="否" Width="96" Style="{StaticResource DarkButton}"/>
+    </StackPanel>
+  </StackPanel>
+</Window>
+"@
+
+$reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
+$win = [System.Windows.Markup.XamlReader]::Load($reader)
+$win.Title = $Title
+$win.FindName('Msg').Text = $Message
+$iconPath = if ($dark) { $IconDark } else { $IconLight }
+try {
+  $fs = [System.IO.File]::OpenRead($iconPath)
+  $win.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create($fs,
+    [System.Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat,
+    [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+  $fs.Close()
+} catch { }
+
 $minutes = @(%s)
-if ($result -eq 'OK') { $r = 'yes'; $m = $minutes[$combo.SelectedIndex] } else { $r = 'no'; $m = 0 }
+$script:answer = 'no'
+$script:minutes = 0
+$win.FindName('Yes').Add_Click({
+  $script:answer = 'yes'
+  $script:minutes = $minutes[$win.FindName('Choice').SelectedIndex]
+  $win.DialogResult = $true
+  $win.Close()
+})
+$win.FindName('No').Add_Click({
+  $script:answer = 'no'
+  $win.DialogResult = $false
+  $win.Close()
+})
+$timer = New-Object System.Windows.Threading.DispatcherTimer
+$timer.Interval = [TimeSpan]::FromSeconds([Math]::Max(1, $WaitSec))
+$timer.Add_Tick({ $timer.Stop(); $script:answer = 'no'; $win.DialogResult = $false; $win.Close() })
+$timer.Start()
+$win.Add_SourceInitialized({
+  try {
+    $helper = New-Object System.Windows.Interop.WindowInteropHelper($win)
+    $v = 1
+    [void][DspgDark]::DwmSetWindowAttribute($helper.Handle, 20, [ref]$v, 4)
+  } catch { }
+})
+$null = $win.ShowDialog()
+$timer.Stop()
+$r = if ($script:answer -eq 'yes') { 'yes' } else { 'no' }
+$m = if ($r -eq 'yes') { $script:minutes } else { 0 }
 $decision = @{ result = $r; minutes = $m; ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
 $decision | ConvertTo-Json | Out-File -FilePath '%s' -Encoding UTF8
 """ % (items, minutes, DECISION_FILE.as_posix())
@@ -604,7 +740,8 @@ def show_popup(title, message):
         subprocess.run(
             [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-File", str(POPUP_PS1), "-Title", title, "-Message", message,
-             "-Icon", str(ICON_FILE), "-WaitSec", str(POPUP_WAIT_SEC)],
+             "-IconLight", str(ICON_LIGHT), "-IconDark", str(ICON_DARK),
+             "-WaitSec", str(POPUP_WAIT_SEC)],
             timeout=POPUP_WAIT_SEC + 5,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

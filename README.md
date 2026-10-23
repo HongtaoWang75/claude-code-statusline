@@ -18,7 +18,7 @@ Guard rails for **Claude Code + DeepSeek**: a hard block during DeepSeek's peak-
 
 DeepSeek doubles its price on weekdays **09:00–12:00 / 14:00–18:00** Beijing time (Chinese public holidays excluded). During those windows this plugin blocks **every tool call**:
 
-- A WinForms dialog asks you: pick an allow duration from the dropdown (default **Allow once**, plus 1 / 3 / 5 / 10 / 20 / 30 / 60 minutes and **Allow for this peak window**), then click Yes; No or a 30-second timeout denies. The dialog icon is the bundled `assets/claude.ico`.
+- A WPF dialog (follows the system light/dark theme) asks you: pick an allow duration from the dropdown (default **Allow once**, plus 1 / 3 / 5 / 10 / 20 / 30 / 60 minutes and **Allow for this peak window**), then click Yes; No or a 30-second timeout denies. The window icon is the bundled `assets/claude-light.ico` (black) / `claude-dark.ico` (white), chosen by the theme.
 - The denial message is **written for the model**: it carries the current time and a ready-to-paste cron expression, so the model schedules the remaining work with `CronCreate` into the next idle window and stops cleanly.
 - Scheduling tools (`CronCreate` / `CronList` / `CronDelete` / `ScheduleWakeup`) are **always allowed** — otherwise the model couldn't even schedule a wake-up.
 - **Turns fired by a scheduled task are exempt for the whole turn**: the hook recognizes them from the transcript (`turnOrigin: "scheduled"` / `scheduledTaskId`, with a `promptId` equal to the hook payload's `prompt_id`). Disable with `"exempt_scheduled": false`.
