@@ -116,7 +116,7 @@ STRINGS = {
         "tui.tail": "选择是否放行本次工具调用（TUI 模式：每次被拦都会询问）",
         "approve.msg": "用户同意临时放行 {minutes} 分钟（至 {until} 后）。本次工具调用放行。",
         "deny.reason": "（用户拒绝了放行或等待超时）",
-        "block.head": "[deepseek-price-guard] 当前处于 DeepSeek 价格高峰时段（{periods}），价格为高峰价（空闲时段 5 折），当前余额 {balance}。本次工具调用已被阻止。",
+        "block.head": "当前处于 DeepSeek 价格高峰时段（{periods}），价格为高峰价（空闲时段 5 折），当前余额 {balance}。本次工具调用已被阻止。",
         "block.time": "时间信息（北京时间）：现在 {now}（周{weekday}），本段高峰还剩 {left}，至 {switch} 结束。",
         "block.cron": "，可直接用 cron 表达式 \"{expr}\"（recurring=false → {time} 触发，即高峰结束后 {after} 分钟）",
         "block.footer": "请停止所有工作并结束本轮回复。如任务未完成，用 CronCreate 安排下一次空闲时段的定时唤醒{cron}，然后停止回复。",
