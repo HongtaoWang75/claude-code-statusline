@@ -12,6 +12,35 @@
 
 ---
 
+## 설치
+
+```bash
+# Claude Code 안에서
+/plugin marketplace add <당신의 GitHub 계정>/claude-code-statusline
+/plugin install claude-code-statusline@claude-code-statusline
+```
+
+사전 조건:
+
+- Python 3.8+ (`python`이 PATH에 있어야 합니다. `python3`만 있는 시스템은 `hooks/hooks.json`의 `python`을 `python3`으로 바꾸세요)
+- 상태 표시줄은 `~/.claude/settings.json`에 설정해야 합니다(플러그인이 settings를 자동으로 바꾸지 않습니다):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python \"C:/Users/<당신>/.claude/plugins/marketplaces/claude-code-statusline/plugins/claude-code-statusline/scripts/deepseek-status.py\"",
+    "refreshInterval": 5
+  }
+}
+```
+
+(`refreshInterval`의 최솟값은 1초입니다. **`0.5`를 쓰면 클램프되지 않고 상태 표시줄 갱신이 완전히 멈춥니다**.)
+
+- 잔액 API에는 API 키가 필요합니다: 환경 변수 `DEEPSEEK_API_KEY`, 또는 `~/.claude/settings.json`의 `env.ANTHROPIC_AUTH_TOKEN`(공식 DeepSeek 엔드포인트를 쓰면 보통 이미 들어 있습니다).
+
+---
+
 ## 기능
 
 ### 1. 피크 가격 하드 게이트 (PreToolUse 훅)
@@ -119,35 +148,6 @@ CC → bash (CC가 강제, 생략 불가) → dspg-status.exe (~15 ms) → 127.0
 3. 데몬 내장 워치독(10초마다): **멈춘 `taskkill`이 60개를 넘으면 자동 회수**(그들이 독점한 `conhost`도 함께 종료). 이는 Claude Code의 "취소 시 `taskkill /T`로 프로세스 트리 정리" 부작용을 자동 억제하는 것입니다. 회수 후에도 연속 두 번 100개를 넘을 때만 `refreshInterval`을 5초로 되돌리는 비상 브레이크가 작동합니다.
 
 설정 방법은 [`scripts/dspg-status.c`](plugins/claude-code-statusline/scripts/dspg-status.c) 상단 주석을 참고하세요. `dspg.env`(exe와 같은 디렉터리, gitignore 처리됨)로 `PYTHONW=<절대 경로>`를 지정할 수 있습니다.
-
----
-
-## 설치
-
-```bash
-# Claude Code 안에서
-/plugin marketplace add <당신의 GitHub 계정>/claude-code-statusline
-/plugin install claude-code-statusline@claude-code-statusline
-```
-
-사전 조건:
-
-- Python 3.8+ (`python`이 PATH에 있어야 합니다. `python3`만 있는 시스템은 `hooks/hooks.json`의 `python`을 `python3`으로 바꾸세요)
-- 상태 표시줄은 `~/.claude/settings.json`에 설정해야 합니다(플러그인이 settings를 자동으로 바꾸지 않습니다):
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "python \"C:/Users/<당신>/.claude/plugins/marketplaces/claude-code-statusline/plugins/claude-code-statusline/scripts/deepseek-status.py\"",
-    "refreshInterval": 5
-  }
-}
-```
-
-(`refreshInterval`의 최솟값은 1초입니다. **`0.5`를 쓰면 클램프되지 않고 상태 표시줄 갱신이 완전히 멈춥니다**.)
-
-- 잔액 API에는 API 키가 필요합니다: 환경 변수 `DEEPSEEK_API_KEY`, 또는 `~/.claude/settings.json`의 `env.ANTHROPIC_AUTH_TOKEN`(공식 DeepSeek 엔드포인트를 쓰면 보통 이미 들어 있습니다).
 
 ---
 

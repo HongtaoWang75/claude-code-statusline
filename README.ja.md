@@ -12,6 +12,35 @@
 
 ---
 
+## インストール
+
+```bash
+# Claude Code 内で
+/plugin marketplace add <あなたの GitHub アカウント>/claude-code-statusline
+/plugin install claude-code-statusline@claude-code-statusline
+```
+
+前提条件：
+
+- Python 3.8+（`python` が PATH にあること。`python3` しかない環境では `hooks/hooks.json` の `python` を `python3` に変更）
+- ステータスラインは `~/.claude/settings.json` で設定する必要があります（プラグインは settings を自動変更しません）：
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python \"C:/Users/<あなた>/.claude/plugins/marketplaces/claude-code-statusline/plugins/claude-code-statusline/scripts/deepseek-status.py\"",
+    "refreshInterval": 5
+  }
+}
+```
+
+（`refreshInterval` の最小値は 1 秒です。**`0.5` を書くとクランプされず、ステータスラインの更新が完全に止まります**。）
+
+- 残高 API には API キーが必要です：環境変数 `DEEPSEEK_API_KEY`、または `~/.claude/settings.json` の `env.ANTHROPIC_AUTH_TOKEN`（公式 DeepSeek エンドポイント利用時は通常すでに入っています）。
+
+---
+
 ## 機能
 
 ### 1. ピーク価格のハードゲート（PreToolUse フック）
@@ -119,35 +148,6 @@ CC → bash（CC が強制、回避不可）→ dspg-status.exe（~15 ms）→ 1
 3. デーモン内蔵のウォッチドッグ（10 秒ごと）：**ハングした `taskkill` が 60 個を超えたら自動回収**（それらが独占する `conhost` も終了）。これは Claude Code の「キャンセル時に `taskkill /T` でプロセスツリーを消す」副作用の自動抑制です。回収後も 2 回連続で 100 個を超えた場合にのみ、`refreshInterval` を 5 秒に戻す緊急ブレーキを作動させます。
 
 導入手順は [`scripts/dspg-status.c`](plugins/claude-code-statusline/scripts/dspg-status.c) の先頭コメントを参照してください。`dspg.env`（exe と同じディレクトリ、gitignore 済み）で `PYTHONW=<絶対パス>` を指定できます。
-
----
-
-## インストール
-
-```bash
-# Claude Code 内で
-/plugin marketplace add <あなたの GitHub アカウント>/claude-code-statusline
-/plugin install claude-code-statusline@claude-code-statusline
-```
-
-前提条件：
-
-- Python 3.8+（`python` が PATH にあること。`python3` しかない環境では `hooks/hooks.json` の `python` を `python3` に変更）
-- ステータスラインは `~/.claude/settings.json` で設定する必要があります（プラグインは settings を自動変更しません）：
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "python \"C:/Users/<あなた>/.claude/plugins/marketplaces/claude-code-statusline/plugins/claude-code-statusline/scripts/deepseek-status.py\"",
-    "refreshInterval": 5
-  }
-}
-```
-
-（`refreshInterval` の最小値は 1 秒です。**`0.5` を書くとクランプされず、ステータスラインの更新が完全に止まります**。）
-
-- 残高 API には API キーが必要です：環境変数 `DEEPSEEK_API_KEY`、または `~/.claude/settings.json` の `env.ANTHROPIC_AUTH_TOKEN`（公式 DeepSeek エンドポイント利用時は通常すでに入っています）。
 
 ---
 

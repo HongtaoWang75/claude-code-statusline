@@ -12,6 +12,35 @@ Guard rails for **Claude Code + DeepSeek**: a hard block during DeepSeek's peak-
 
 ---
 
+## Install
+
+```bash
+# inside Claude Code
+/plugin marketplace add <your-github-account>/claude-code-statusline
+/plugin install claude-code-statusline@claude-code-statusline
+```
+
+Requirements:
+
+- Python 3.8+ (`python` on PATH; on systems with only `python3`, change `python` to `python3` in `hooks/hooks.json`)
+- The status line must be configured in `~/.claude/settings.json` (the plugin won't edit your settings):
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python \"C:/Users/<you>/.claude/plugins/marketplaces/claude-code-statusline/plugins/claude-code-statusline/scripts/deepseek-status.py\"",
+    "refreshInterval": 5
+  }
+}
+```
+
+(`refreshInterval` is in seconds and the minimum is 1. **`0.5` does not clamp — it stops the status line from refreshing at all**.)
+
+- The balance endpoint needs an API key: the `DEEPSEEK_API_KEY` environment variable, or `env.ANTHROPIC_AUTH_TOKEN` in `~/.claude/settings.json` (usually already there when you use the official DeepSeek endpoint).
+
+---
+
 ## Features
 
 ### 1. Peak-price hard gate (PreToolUse hook)
@@ -119,35 +148,6 @@ Three layers of fallback:
 3. A watchdog inside the daemon (every 10 s) **reaps hung `taskkill` processes when more than 60 accumulate** (their `conhost` children exit with them) — this suppresses the side effects of Claude Code's "`taskkill /T` the process tree on cancel". Only if the count stays above 100 for two consecutive checks does it downgrade `refreshInterval` back to 5 s as an emergency brake.
 
 Setup steps are in the header comment of [`scripts/dspg-status.c`](plugins/claude-code-statusline/scripts/dspg-status.c); `dspg.env` (next to the exe, gitignored) can pin `PYTHONW=<absolute path>`.
-
----
-
-## Install
-
-```bash
-# inside Claude Code
-/plugin marketplace add <your-github-account>/claude-code-statusline
-/plugin install claude-code-statusline@claude-code-statusline
-```
-
-Requirements:
-
-- Python 3.8+ (`python` on PATH; on systems with only `python3`, change `python` to `python3` in `hooks/hooks.json`)
-- The status line must be configured in `~/.claude/settings.json` (the plugin won't edit your settings):
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "python \"C:/Users/<you>/.claude/plugins/marketplaces/claude-code-statusline/plugins/claude-code-statusline/scripts/deepseek-status.py\"",
-    "refreshInterval": 5
-  }
-}
-```
-
-(`refreshInterval` is in seconds and the minimum is 1. **`0.5` does not clamp — it stops the status line from refreshing at all**.)
-
-- The balance endpoint needs an API key: the `DEEPSEEK_API_KEY` environment variable, or `env.ANTHROPIC_AUTH_TOKEN` in `~/.claude/settings.json` (usually already there when you use the official DeepSeek endpoint).
 
 ---
 

@@ -12,6 +12,35 @@
 
 ---
 
+## 安装
+
+```bash
+# 在 Claude Code 里
+/plugin marketplace add <你的 GitHub 账号>/claude-code-statusline
+/plugin install claude-code-statusline@claude-code-statusline
+```
+
+前置条件：
+
+- Python 3.8+（`python` 在 PATH 里；只有 `python3` 的系统请把 `hooks/hooks.json` 里的 `python` 改成 `python3`）
+- 状态栏需要在 `~/.claude/settings.json` 里配置（插件不会自动改你的 settings）：
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "python \"C:/Users/<你>/.claude/plugins/marketplaces/claude-code-statusline/plugins/claude-code-statusline/scripts/deepseek-status.py\"",
+    "refreshInterval": 5
+  }
+}
+```
+
+（`refreshInterval` 最小 1 秒。**填 0.5 不会生效，状态栏会直接停止刷新**。）
+
+- 余额接口需要 API key：环境变量 `DEEPSEEK_API_KEY`，或读 `~/.claude/settings.json` 的 `env.ANTHROPIC_AUTH_TOKEN`（用 DeepSeek 官方端点时通常已经在里面）
+
+---
+
 ## 功能
 
 ### 1. 峰谷价硬拦截（PreToolUse hook）
@@ -119,35 +148,6 @@ CC → bash（CC 强制，省不掉）→ dspg-status.exe（~15 ms）→ 127.0.0
 3. daemon 内置看门狗（每 10 秒）：**挂住的 `taskkill` 超过 60 个就自动回收**（它们独占的 `conhost` 会随之退出）——这是对 Claude Code「取消时 `taskkill /T` 清进程树」副作用的自动抑制；回收后仍连续两次超过 100 个，才把 `refreshInterval` 降回 5 秒兜底（防雪崩自动止血）
 
 启用步骤见 [`scripts/dspg-status.c`](plugins/claude-code-statusline/scripts/dspg-status.c) 头部注释；`dspg.env`（与本 exe 同目录，已被 gitignore）可指定 `PYTHONW=<绝对路径>`。
-
----
-
-## 安装
-
-```bash
-# 在 Claude Code 里
-/plugin marketplace add <你的 GitHub 账号>/claude-code-statusline
-/plugin install claude-code-statusline@claude-code-statusline
-```
-
-前置条件：
-
-- Python 3.8+（`python` 在 PATH 里；只有 `python3` 的系统请把 `hooks/hooks.json` 里的 `python` 改成 `python3`）
-- 状态栏需要在 `~/.claude/settings.json` 里配置（插件不会自动改你的 settings）：
-
-```json
-{
-  "statusLine": {
-    "type": "command",
-    "command": "python \"C:/Users/<你>/.claude/plugins/marketplaces/claude-code-statusline/plugins/claude-code-statusline/scripts/deepseek-status.py\"",
-    "refreshInterval": 5
-  }
-}
-```
-
-（`refreshInterval` 最小 1 秒。**填 0.5 不会生效，状态栏会直接停止刷新**。）
-
-- 余额接口需要 API key：环境变量 `DEEPSEEK_API_KEY`，或读 `~/.claude/settings.json` 的 `env.ANTHROPIC_AUTH_TOKEN`（用 DeepSeek 官方端点时通常已经在里面）
 
 ---
 
