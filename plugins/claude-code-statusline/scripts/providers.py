@@ -115,7 +115,8 @@ THEMES = {
     "moonshot": ["#1080F0", "#2494FF", "#3DADFF"],   # 取色自 Kimi 图标蓝点
     "anthropic": ["#D07050", "#E48464", "#FD9D7D"],  # 取色自 Claude 星芒橙
     "openai": ["#10A37F", "#24B793", "#3DD0AC"],
-    "gemini": ["#3080F0", "#4494FF", "#5DADFF"],     # 取色自 Gemini 菱形主蓝
+    # Gemini：取自图标渐变的四色（蓝为主，红/黄/绿为辅助）
+    "gemini": ["#3781E8", "#C34E5C", "#C4AD22", "#3AAC5A"],
     "glm": ["#3859FF", "#4C6DFF", "#6586FF"],
     "xiaomi": ["#FF6900", "#FF7D14", "#FF962D"],
     "unknown": ["#9CA3AF", "#B0B7C3", "#C9D0DC"],
