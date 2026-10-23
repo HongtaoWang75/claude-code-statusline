@@ -18,9 +18,7 @@
 
 DeepSeek は平日 **09:00–12:00 / 14:00–18:00**（北京時間、中国の法定祝日を除く）に価格が 2 倍になります。この時間帯、本プラグインは**すべてのツール呼び出し**をブロックします：
 
-- 確認方法は 2 種類。`/claude-code-statusline:settings` で切り替えます（`~/.claude/.dspg_config.json` に保存）：
-  - **TUI ネイティブダイアログ**（`popup_mode: "tui"`）：フックが `permissionDecision: "ask"` を返し、Claude Code 自身の権限ダイアログで確認します。フォーカスを奪わず、キーボードで操作できます。フックは回答前に終了するため選択内容は見えず、ブロックされるたびに毎回確認されます。
-  - **独立ウィンドウ**（`popup_mode: "window"`、既定）：Windows のモーダルダイアログ。「はい」で 30 分間の一時許可、「いいえ」または 30 秒無応答で拒否。
+- WinForms ダイアログで確認します：メッセージの下のドロップダウンで許可時間を選び（既定は **今回のみ許可**、ほかに 1 / 3 / 5 / 10 / 20 / 30 / 60 分と **今回のピーク時間帯を許可**）、「はい」を押します。「いいえ」または 30 秒無応答で拒否。アイコンは同梱の `assets/claude.ico` です。
 - 拒否メッセージは**モデル向け**に書かれています：現在時刻とそのまま使える cron 式が含まれ、モデルは `CronCreate` で残りの作業を次のアイドル時間帯に予約し、きれいに終了します。
 - スケジューリング系ツール（`CronCreate` / `CronList` / `CronDelete` / `ScheduleWakeup`）は**常に許可**されます。そうでなければモデルは予約自体できません。
 - **スケジュールタスクが起動したターンはターン全体が免除**されます：フックは transcript から判別します（`turnOrigin: "scheduled"` / `scheduledTaskId`、かつ `promptId` がフックの `prompt_id` と一致）。無効化するには `"exempt_scheduled": false`。
@@ -165,7 +163,6 @@ Claude Code 内蔵の `/config` はプラグインによる項目追加を許可
 
 | 設定 | 保存先 | 説明 |
 |---|---|---|
-| ポップアップ方式 | `~/.claude/.dspg_config.json` → `popup_mode` | `tui`（CC ネイティブダイアログ）/ `window`（独立ウィンドウ、30 分間の一時許可） |
 | 更新間隔（秒） | `~/.claude/settings.json` → `statusLine.refreshInterval` | 1 / 2 / 5 / 15 秒、**最小 1 秒** |
 | 言語 | `~/.claude/.dspg_config.json` → `language` | `auto`（システムの表示言語に従う）/ `en` / `zh`。UI 文言は現在 英語・中国語に対応し、それ以外は英語にフォールバック |
 | モデルのテーマカラー | `~/.claude/.dspg_config.json` → `model_theme` | `true`（既定）：ブランドカラー / `false`：単色 |

@@ -32,13 +32,6 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import i18n  # noqa: E402      多语言文案：跟随系统显示语言，默认英语
 import providers  # noqa: E402 主流 provider：识别 / 余额 / 价格表
 
-# 可选本地扩展：同目录存在 theme_demo_local.py 时，由它接管模型段渲染。
-# 该文件不进版本库（.gitignore 的 *_local.py），正式版不包含任何演示逻辑。
-try:
-    import theme_demo_local
-except Exception:
-    theme_demo_local = None
-
 # Windows 管道重定向时默认 GBK，emoji 会崩 → 两条流都强制 UTF-8
 for stream in (sys.stdout, sys.stderr):
     try:
@@ -856,13 +849,6 @@ def main(argv=None):
     cfg = load_config()
     use_theme = cfg.get("model_theme", True) is not False
     model_txt = themed_text(disp_model, provider, enabled=use_theme)
-    if theme_demo_local is not None:      # 本地扩展（正式版没有这个文件）
-        try:
-            custom = theme_demo_local.decorate(disp_model, provider, cfg)
-            if custom:
-                model_txt = custom
-        except Exception:
-            pass
     if tier and disp_model:
         model_txt = f"{RED}◆{RESET}" + model_txt
     core = " · ".join(p for p in (model_txt, balance_txt, tag_txt) if p)
@@ -886,7 +872,7 @@ def main(argv=None):
         usage.append(f"{tok_txt}×{seg_calls} turn{'s' if seg_calls > 1 else ''}")
     if rate is not None:
         shown = float(round(rate))   # 显示为整数，警戒也按显示值判
-        rate_txt = decorate(f"{rate:.0f}tok/s",
+        rate_txt = decorate(f"{rate:.0f}toks/s",
                             warn_rgb(shown, RATE_WARN_TPS, RATE_RED_TPS),  # <150 黄 → ≤100 红
                             "rate", blink)
         usage.append(rate_txt)

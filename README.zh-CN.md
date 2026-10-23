@@ -18,9 +18,7 @@
 
 DeepSeek 的工作日 **09:00–12:00 / 14:00–18:00**（北京时间，法定节假日全天除外）价格翻倍。高峰时段里，本插件会拦下**所有工具调用**：
 
-- 询问方式两种，用 `/claude-code-statusline:settings` 切换（存 `~/.claude/.dspg_config.json`）：
-  - **TUI 原生对话框**（`popup_mode: "tui"`）：hook 输出 `permissionDecision: "ask"`，由 Claude Code 自己的权限对话框询问——不抢焦点、可键盘操作。hook 看不到用户的选择，所以每次被拦都会再问一次
-  - **独立窗口**（`popup_mode: "window"`，默认）：弹 Windows 模态框，点「是」临时放行 30 分钟，点「否」/ 等 30 秒 = 拒绝
+- 弹 WinForms 对话框：提示文字下方是放行时长下拉菜单（默认 **放行一次**，另有 1 / 3 / 5 / 10 / 20 / 30 / 60 分钟和 **放行本次高峰期**），选好后点「是」；点「否」或 30 秒无响应 = 拒绝。窗口图标用插件内打包的 `assets/claude.ico`
 - 拒绝时的提示词是**给模型看的**，带完整时间信息与可直接抄用的 cron 表达式，模型会用 `CronCreate` 把任务排到下一个空闲时段，然后干净地收尾
 - 定时/唤醒类工具（`CronCreate` / `CronList` / `CronDelete` / `ScheduleWakeup`）**永远放行**，否则模型连「预约到空闲时段」都做不到
 - **定时任务触发的整个回合自动放行**：hook 从 transcript 认出该轮是定时任务注入的（`turnOrigin: "scheduled"` / `scheduledTaskId`，且 `promptId` 与 hook 的 `prompt_id` 相同）→ 高峰也不拦。不想这样可在 `.dspg_config.json` 里设 `"exempt_scheduled": false`
@@ -165,7 +163,6 @@ Claude Code 内置的 `/config` 不允许插件往里加设置项，所以用命
 
 | 设置 | 存哪里 | 说明 |
 |---|---|---|
-| 弹窗方式 | `~/.claude/.dspg_config.json` → `popup_mode` | `tui`（CC 原生对话框）/ `window`（独立窗口，可 30 分钟放行） |
 | 刷新秒数 | `~/.claude/settings.json` → `statusLine.refreshInterval` | 1 / 2 / 5 / 15 秒可选，**最小 1 秒** |
 | 语言 | `~/.claude/.dspg_config.json` → `language` | `auto`（跟随系统显示语言）/ `en` / `zh`；界面文案目前支持中英，其它语言回退英文 |
 | 模型主题色 | `~/.claude/.dspg_config.json` → `model_theme` | `true`（默认）：品牌色 / `false`：纯色 |

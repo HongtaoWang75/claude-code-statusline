@@ -5,16 +5,11 @@ DeepSeek 峰谷定价 + 余额守护 hook（PreToolUse）
 
 功能：
 1. 高峰时段（北京时间 周一至周五 09:00-12:00、14:00-18:00，法定节假日全天
-   空闲）阻止工具调用。询问方式由 ~/.claude/.dspg_config.json 的 popup_mode
-   决定（/claude-code-statusline:settings 可切换）：
-   - "tui"：hook 输出 permissionDecision="ask"，由 Claude Code
-     自己的权限对话框询问；选「允许」本次放行。hook 看不到用户选择，因此
-     每次被拦都会再问一次，不写 30 分钟放行状态
-   - "window"（默认）：弹 Popup 模态对话框（WScript.Shell.Popup）：
-       点「是」→ 临时放行本会话 30 分钟（~/.claude/.dspg_override.json）
-       点「否」/ 30 秒无响应 → 继续拦截
-     注：Windows Toast 的协议激活在未打包应用下失效（按钮/正文点击均
-     不触发，实测多次），故窗口交互走 Popup，100% 可靠
+   空闲）阻止工具调用。弹 WinForms 对话框：
+   - 提示文字下方是放行时长下拉菜单（默认「放行一次」，另有 1/3/5/10/20/30/60
+     分钟、放行本次高峰期）
+   - 点「是」按所选时长放行；点「否」/ 30 秒无响应 → 继续拦截
+   - 窗口图标用插件内打包的 assets/claude.ico
 2. 每次工具调用注入余额，低于阈值（¥5）输出省流警告
 3. 高峰前 15 分钟提前警告
 4. 拦截提示词携带当前时间、本段高峰剩余/结束时刻，并给出可直接使用的
@@ -22,9 +17,8 @@ DeepSeek 峰谷定价 + 余额守护 hook（PreToolUse）
 
 文件：
    放行状态  ~/.claude/.dspg_override.json     {session_id, expires}
-   决策文件  ~/.claude/.dspg_decision.json     {result: yes/no, ts}
-   按钮回调  ~/.claude/.dspg_action.ps1        （协议注册指向的 PowerShell）
-   Toast脚本 ~/.claude/.dspg_toast.ps1         （UTF-8 BOM，自动生成）
+   决策文件  ~/.claude/.dspg_decision.json     {result: yes/no, minutes, ts}
+   弹窗脚本  ~/.claude/.dspg_popup.ps1         （UTF-8 BOM，自动生成）
 
 测试：
     python price-guard.py --now 10:00 --weekday 0 --simulate-popup no  # 普通周一高峰+拒绝 → exit 2
@@ -79,11 +73,24 @@ PAYLOAD_DUMP = HOME / ".claude" / ".dspg_hook_payload.json"   # 最近一次 hoo
 PAYLOADS_JSONL = HOME / ".claude" / ".dspg_hook_payloads.jsonl"  # 追加留档（1MB 滚动）
 PROVIDER_FILE = HOME / ".claude" / ".dspg_provider.json"   # 状态栏每帧写的当前 provider
 TURN_CACHE_FILE = HOME / ".claude" / ".dspg_turn_cache.json"  # prompt_id → 是否定时回合
-DEFAULT_CONFIG = {"popup_mode": "window", "refresh_seconds": 1,
-                  "exempt_scheduled": True, "provider": "auto"}
+DEFAULT_CONFIG = {"refresh_seconds": 1, "exempt_scheduled": True, "provider": "auto"}
 TRANSCRIPT_TAIL_BYTES = 4 << 20   # 判定「定时回合」只读 transcript 末尾 4MB
 ACTION_PS1 = HOME / ".claude" / ".dspg_action.ps1"
 POPUP_PS1 = HOME / ".claude" / ".dspg_popup.ps1"
+ICON_FILE = pathlib.Path(__file__).resolve().parent.parent / "assets" / "claude.ico"
+
+# 窗口下拉菜单：minutes = 0 放行一次；>0 放行 N 分钟；-1 = 放行到本段高峰结束
+ALLOW_CHOICES = [
+    (0, "放行一次"),
+    (1, "放行 1 分钟"),
+    (3, "放行 3 分钟"),
+    (5, "放行 5 分钟"),
+    (10, "放行 10 分钟"),
+    (20, "放行 20 分钟"),
+    (30, "放行 30 分钟"),
+    (60, "放行 60 分钟"),
+    (-1, "放行本次高峰期"),
+]
 BALANCE_CACHE = HOME / ".claude" / ".balance_cache.json"
 HOLIDAYS_FILE = HOME / ".claude" / ".dspg_holidays.json"
 TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -237,7 +244,7 @@ def load_config():
     try:
         data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            for k in ("popup_mode", "refresh_seconds", "exempt_scheduled", "provider"):
+            for k in ("refresh_seconds", "exempt_scheduled", "provider"):
                 if k in data:
                     cfg[k] = data[k]
     except Exception:
@@ -439,6 +446,17 @@ def write_override(session_id, minutes):
         pass
 
 
+def write_override_until(session_id, until_dt):
+    """放行到指定时刻（用于「放行本次高峰期」）。"""
+    try:
+        OVERRIDE_FILE.write_text(
+            json.dumps({"session_id": session_id, "expires": until_dt.timestamp()}),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
 # ---------- Toast 通知 + 协议回调 ----------
 
 def ensure_action_ps1():
@@ -491,16 +509,15 @@ def ensure_protocols():
 
 
 def wait_decision(timeout=DECISION_TIMEOUT):
-    """轮询决策文件，返回 "yes"/"no"/None（超时）。"""
+    """轮询决策文件，返回 {"result": "yes"/"no", "minutes": N, "ts": ...} 或 None（超时）。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
             # PS5.1 Out-File UTF8 带 BOM → 用 utf-8-sig 读取
             d = json.loads(DECISION_FILE.read_text(encoding="utf-8-sig"))
-            result = d.get("result")
-            if result in ("yes", "no"):
+            if d.get("result") in ("yes", "no"):
                 DECISION_FILE.unlink(missing_ok=True)
-                return result
+                return d
         except FileNotFoundError:
             pass
         except Exception:
@@ -514,18 +531,60 @@ def wait_decision(timeout=DECISION_TIMEOUT):
 
 
 def ensure_popup_ps1():
-    """写 Popup 弹窗脚本（WScript.Shell.Popup 模态对话框，100% 可靠）。幂等。"""
-    ps1 = (
-        "# DSPG popup - modal dialog via WScript.Shell\n"
-        "param([string]$Title, [string]$Message)\n"
-        "$ws = New-Object -ComObject WScript.Shell\n"
-        f"$r = $ws.Popup($Message, {POPUP_WAIT_SEC}, $Title, 36)\n"
-        "$result = $null\n"
-        "if ($r -eq 6) { $result = 'yes' } elseif ($r -eq 7) { $result = 'no' } else { exit 0 }\n"
-        "$decision = @{ result = $result; ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }\n"
-        "$decision | ConvertTo-Json | Out-File -FilePath "
-        f"'{DECISION_FILE.as_posix()}' -Encoding UTF8\n"
-    )
+    """写弹窗脚本：WinForms 对话框（提示文字 + 放行时长下拉菜单 + 是/否）。幂等。"""
+    items = ", ".join("'" + label.replace("'", "''") + "'" for _, label in ALLOW_CHOICES)
+    minutes = ", ".join(str(m) for m, _ in ALLOW_CHOICES)
+    ps1 = """# DSPG popup - WinForms dialog: message + allow-duration dropdown
+param([string]$Title, [string]$Message, [string]$Icon, [int]$WaitSec)
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$form = New-Object System.Windows.Forms.Form
+$form.Text = $Title
+$form.StartPosition = 'CenterScreen'
+$form.TopMost = $true
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+$form.ShowInTaskbar = $true
+$form.ClientSize = New-Object System.Drawing.Size(600, 260)
+try { $form.Icon = New-Object System.Drawing.Icon($Icon) } catch { }
+$label = New-Object System.Windows.Forms.Label
+$label.Text = $Message
+$label.AutoSize = $false
+$label.Location = New-Object System.Drawing.Point(16, 14)
+$label.Size = New-Object System.Drawing.Size(568, 156)
+$form.Controls.Add($label)
+$combo = New-Object System.Windows.Forms.ComboBox
+$combo.DropDownStyle = 'DropDownList'
+$combo.Location = New-Object System.Drawing.Point(16, 178)
+$combo.Size = New-Object System.Drawing.Size(320, 26)
+[void]$combo.Items.AddRange(@(%s))
+$combo.SelectedIndex = 0
+$form.Controls.Add($combo)
+$ok = New-Object System.Windows.Forms.Button
+$ok.Text = '是'
+$ok.DialogResult = 'OK'
+$ok.Location = New-Object System.Drawing.Point(396, 214)
+$ok.Size = New-Object System.Drawing.Size(90, 28)
+$form.Controls.Add($ok)
+$no = New-Object System.Windows.Forms.Button
+$no.Text = '否'
+$no.DialogResult = 'Cancel'
+$no.Location = New-Object System.Drawing.Point(494, 214)
+$no.Size = New-Object System.Drawing.Size(90, 28)
+$form.Controls.Add($no)
+$form.AcceptButton = $ok
+$form.CancelButton = $no
+$timer = New-Object System.Windows.Forms.Timer
+$timer.Interval = [Math]::Max(1, $WaitSec) * 1000
+$timer.Add_Tick({ $timer.Stop(); $form.DialogResult = 'Cancel'; $form.Close() })
+$timer.Start()
+$result = $form.ShowDialog()
+$minutes = @(%s)
+if ($result -eq 'OK') { $r = 'yes'; $m = $minutes[$combo.SelectedIndex] } else { $r = 'no'; $m = 0 }
+$decision = @{ result = $r; minutes = $m; ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
+$decision | ConvertTo-Json | Out-File -FilePath '%s' -Encoding UTF8
+""" % (items, minutes, DECISION_FILE.as_posix())
     try:
         POPUP_PS1.write_text(ps1, encoding="utf-8-sig")
     except Exception:
@@ -533,17 +592,13 @@ def ensure_popup_ps1():
 
 
 def show_popup(title, message):
-    """同步弹 Popup 等用户点击（脚本内最多等 POPUP_WAIT_SEC 秒），完成后返回。
-
-    超时只留 +3 秒余量：旧版这里是 +10，且之后 wait_decision 还再等 30 秒，
-    总计 60+ 秒 > hooks.json 的 45 秒超时 → CC 直接把 hook 杀掉，用户看到的是
-    "卡很久然后失败"（2026-10-20 用户报"窗口等待不会超时"）。
-    """
+    """同步弹窗并等用户选择（脚本内最多等 POPUP_WAIT_SEC 秒），完成后返回。"""
     try:
         subprocess.run(
             [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
-             "-File", str(POPUP_PS1), "-Title", title, "-Message", message],
-            timeout=POPUP_WAIT_SEC + 3,
+             "-File", str(POPUP_PS1), "-Title", title, "-Message", message,
+             "-Icon", str(ICON_FILE), "-WaitSec", str(POPUP_WAIT_SEC)],
+            timeout=POPUP_WAIT_SEC + 5,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -578,71 +633,56 @@ def _release_popup_mutex(h):
 
 
 def _last_decision():
-    """最近 60 秒内是否已经做过决定（含超时=拒绝）→ 返回 "yes"/"no"/None。"""
+    """最近一次决定 → (decision_dict, age)；没有则 (None, None)。"""
     try:
         d = json.loads(LAST_DECISION_FILE.read_text(encoding="utf-8"))
-        if time.time() - d.get("ts", 0) <= DECISION_REUSE_SEC:
-            return d.get("result")
+        return d, time.time() - d.get("ts", 0)
     except Exception:
-        pass
-    return None
+        return None, None
 
 
-def _remember_decision(ok):
+def _remember_decision(decision):
     try:
-        LAST_DECISION_FILE.write_text(
-            json.dumps({"ts": time.time(), "result": "yes" if ok else "no"}),
-            encoding="utf-8")
+        LAST_DECISION_FILE.write_text(json.dumps({
+            "ts": time.time(),
+            "result": decision.get("result"),
+            "minutes": decision.get("minutes", 0),
+        }), encoding="utf-8")
     except Exception:
         pass
 
 
 def ask_user(message, simulate=None):
-    """弹 Popup 模态对话框并等待决策；返回 True=同意放行。
+    """弹窗并等待决策；返回 {"result": "yes"/"no", "minutes": N}。
 
     simulate: "yes"/"no" 测试用；None=真实弹窗。
-    并发安全：用命名互斥体串行化——同时触发的多个工具调用只会弹**一个**窗，
-    排队的实例复用刚刚的决定（60 秒内），不会再各弹各的。
+    并发安全：命名互斥体串行化——同时触发的多个工具调用只弹一个窗；
+    排队的实例复用刚做过的决定（定长放行 60 秒内复用；“放行一次”只复用到并发爆发窗口 5 秒）。
     """
     if simulate == "yes":
-        return True
+        return {"result": "yes", "minutes": 0}
     if simulate == "no":
-        return False
+        return {"result": "no", "minutes": 0}
     mtx = _acquire_popup_mutex((POPUP_WAIT_SEC + 5) * 1000)
     try:
         if check_override(None):      # 排队期间别的实例可能已经拿到放行
-            return True
-        prev = _last_decision()       # 刚有人点过（或超时）→ 直接复用，不再弹窗
+            return {"result": "yes", "minutes": 1}
+        prev, age = _last_decision()
         if prev is not None:
-            return prev == "yes"
+            minutes = int(prev.get("minutes") or 0)
+            ttl = DECISION_REUSE_SEC if minutes else 5
+            if age <= ttl:
+                return prev
         ensure_popup_ps1()
         show_popup(i18n.t("popup.title"), message)
-        # 弹窗进程退出前已把决策写盘，这里只要很短的宽限期（旧版又等 30 秒是 bug）
-        ok = wait_decision(timeout=3) == "yes"
-        _remember_decision(ok)
-        return ok
+        decision = wait_decision(timeout=3)
+        if decision is None:
+            decision = {"result": "no", "minutes": 0}
+        _remember_decision(decision)
+        return decision
     finally:
         if mtx:
             _release_popup_mutex(mtx)
-
-
-def emit_ask(reason):
-    """TUI 模式：把决策交回 CC 自己的原生权限对话框（permissionDecision=ask）。
-
-    CC 收到后弹它自己的询问 UI（不抢焦点、可键盘操作），用户选「允许」本次
-    调用放行、选「拒绝」则拒绝。注意：hook 在弹出对话框前就已退出，看不到
-    用户的选择，所以 TUI 模式**不写** 30 分钟放行状态——高峰里每次被拦都会
-    再问一次。想「点一次安静 30 分钟」请切到 window 模式（见 settings 命令）。
-    """
-    out = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "ask",
-            "permissionDecisionReason": reason,
-        }
-    }
-    sys.stdout.write(json.dumps(out, ensure_ascii=False))
-    sys.stdout.flush()
 
 
 def block_message(balance_txt, reason="", now_dt=None, switch_dt=None):
@@ -757,33 +797,33 @@ def main():
     peak_left_min = minutes_to_next_switch(h, m, d)
     peak_left = fmt_duration(peak_left_min)
     switch_dt = now_dt.replace(second=0, microsecond=0) + datetime.timedelta(minutes=peak_left_min)
-    mode = load_config().get("popup_mode") or "window"
-    msg_tail = "\n\n" + (
-        i18n.t("window.tail", minutes=OVERRIDE_MIN) if mode == "window"
-        else i18n.t("tui.tail")
-    )
     popup_msg = (
         i18n.t("peak.body", periods=peak_periods_text()) + "\n"
         + i18n.t("peak.left", left=peak_left, switch=f"{switch_dt:%H:%M}") + "\n"
-        + i18n.t("balance.line", balance=balance_txt) + msg_tail
+        + i18n.t("balance.line", balance=balance_txt) + "\n\n"
+        + i18n.t("window.tail")
     )
-    if args.simulate_popup is not None:
-        mode = "window"    # 测试开关优先：模拟按钮结果只对窗口模式有意义
-    if mode == "tui":
-        # 交给 CC 自己的权限对话框；hook 已退出，看不到用户的选择
-        emit_ask(popup_msg)
-        log_decision("ask", "peak tui")
-        return 0
-    ok = ask_user(popup_msg, simulate=args.simulate_popup)
-
-    if ok:
-        write_override(session_id, OVERRIDE_MIN)
-        log_decision("pass", f"peak approved {OVERRIDE_MIN}min")
-        sys.stderr.write(
-            "\n[deepseek-price-guard] " + i18n.t(
-                "approve.msg", minutes=OVERRIDE_MIN,
-                until=datetime.datetime.now(TZ).strftime("%H:%M")) + "\n"
-        )
+    decision = ask_user(popup_msg, simulate=args.simulate_popup)
+    if decision.get("result") == "yes":
+        minutes = int(decision.get("minutes") or 0)
+        if minutes > 0:
+            write_override(session_id, minutes)
+            log_decision("pass", f"peak approved {minutes}min")
+            sys.stderr.write(
+                "\n[deepseek-price-guard] " + i18n.t(
+                    "approve.msg", minutes=minutes,
+                    until=datetime.datetime.now(TZ).strftime("%H:%M")) + "\n"
+            )
+        elif minutes < 0:
+            write_override_until(session_id, switch_dt)
+            log_decision("pass", "peak approved until-peak-end")
+            sys.stderr.write(
+                "\n[deepseek-price-guard] " + i18n.t(
+                    "approve.peak", until=f"{switch_dt:%H:%M}") + "\n"
+            )
+        else:
+            log_decision("pass", "peak approved once")
+            sys.stderr.write("\n[deepseek-price-guard] " + i18n.t("approve.once") + "\n")
         return 0
     else:
         log_decision("block", "peak denied/timeout")

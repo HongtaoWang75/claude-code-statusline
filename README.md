@@ -18,9 +18,7 @@ Guard rails for **Claude Code + DeepSeek**: a hard block during DeepSeek's peak-
 
 DeepSeek doubles its price on weekdays **09:00–12:00 / 14:00–18:00** Beijing time (Chinese public holidays excluded). During those windows this plugin blocks **every tool call**:
 
-- Two ways to ask, switchable with `/claude-code-statusline:settings` (stored in `~/.claude/.dspg_config.json`):
-  - **Native TUI dialog** (`popup_mode: "tui"`): the hook returns `permissionDecision: "ask"`, and Claude Code shows its own permission dialog — no focus stealing, keyboard-friendly. The hook exits before you answer, so it cannot see your choice: you are asked again on every blocked call.
-  - **Standalone window** (`popup_mode: "window"`, default): a Windows modal. "Yes" grants a 30-minute override; "No" or a 30-second timeout denies.
+- A WinForms dialog asks you: pick an allow duration from the dropdown (default **Allow once**, plus 1 / 3 / 5 / 10 / 20 / 30 / 60 minutes and **Allow for this peak window**), then click Yes; No or a 30-second timeout denies. The dialog icon is the bundled `assets/claude.ico`.
 - The denial message is **written for the model**: it carries the current time and a ready-to-paste cron expression, so the model schedules the remaining work with `CronCreate` into the next idle window and stops cleanly.
 - Scheduling tools (`CronCreate` / `CronList` / `CronDelete` / `ScheduleWakeup`) are **always allowed** — otherwise the model couldn't even schedule a wake-up.
 - **Turns fired by a scheduled task are exempt for the whole turn**: the hook recognizes them from the transcript (`turnOrigin: "scheduled"` / `scheduledTaskId`, with a `promptId` equal to the hook payload's `prompt_id`). Disable with `"exempt_scheduled": false`.
@@ -165,7 +163,6 @@ It asks you four things and writes the files below:
 
 | Setting | Stored in | Notes |
 |---|---|---|
-| Popup mode | `~/.claude/.dspg_config.json` → `popup_mode` | `tui` (native CC dialog) / `window` (standalone window with a 30-minute override) |
 | Refresh seconds | `~/.claude/settings.json` → `statusLine.refreshInterval` | 1 / 2 / 5 / 15 s, **minimum 1 s** |
 | Language | `~/.claude/.dspg_config.json` → `language` | `auto` (follow the system display language) / `en` / `zh`. The UI currently ships English and Chinese; other languages fall back to English |
 | Model theme | `~/.claude/.dspg_config.json` → `model_theme` | `true` (default): brand colors / `false`: plain |

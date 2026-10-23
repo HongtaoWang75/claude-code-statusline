@@ -18,9 +18,7 @@
 
 DeepSeek은 평일 **09:00–12:00 / 14:00–18:00**(베이징 시간, 중국 법정 공휴일 제외)에 가격이 2배가 됩니다. 이 시간대에 이 플러그인은 **모든 도구 호출**을 차단합니다:
 
-- 확인 방식은 두 가지이며 `/claude-code-statusline:settings`로 전환합니다(`~/.claude/.dspg_config.json`에 저장):
-  - **TUI 네이티브 대화상자** (`popup_mode: "tui"`): 훅이 `permissionDecision: "ask"`를 반환하면 Claude Code 자체 권한 대화상자가 뜹니다. 포커스를 빼앗지 않고 키보드로 조작할 수 있습니다. 훅은 응답 전에 종료되므로 선택 내용을 볼 수 없어, 차단될 때마다 다시 묻습니다.
-  - **독립 창** (`popup_mode: "window"`, 기본): Windows 모달. "예"를 누르면 30분 임시 허용, "아니오" 또는 30초 무응답이면 거부.
+- WinForms 대화상자로 확인합니다: 메시지 아래 드롭다운에서 허용 시간을 고르고(기본 **이번 한 번만 허용**, 그 외 1 / 3 / 5 / 10 / 20 / 30 / 60분, **이번 피크 시간대 허용**), "예"를 누릅니다. "아니오" 또는 30초 무응답이면 거부. 아이콘은 동봉된 `assets/claude.ico`입니다.
 - 거부 메시지는 **모델을 위한 것**입니다: 현재 시각과 그대로 붙여넣을 수 있는 cron 표현식이 들어 있어, 모델이 `CronCreate`로 남은 작업을 다음 유휴 시간대로 예약하고 깔끔하게 마무리합니다.
 - 스케줄링 도구(`CronCreate` / `CronList` / `CronDelete` / `ScheduleWakeup`)는 **항상 허용**됩니다. 그렇지 않으면 모델이 예약 자체를 할 수 없습니다.
 - **예약 작업이 시작한 턴은 턴 전체가 면제**됩니다: 훅이 transcript에서 식별합니다(`turnOrigin: "scheduled"` / `scheduledTaskId`, `promptId`가 훅의 `prompt_id`와 일치). 비활성화하려면 `"exempt_scheduled": false`.
@@ -165,7 +163,6 @@ Claude Code 내장 `/config`는 플러그인이 항목을 추가하는 것을 �
 
 | 설정 | 저장 위치 | 설명 |
 |---|---|---|
-| 팝업 방식 | `~/.claude/.dspg_config.json` → `popup_mode` | `tui`(CC 네이티브 대화상자) / `window`(독립 창, 30분 임시 허용) |
 | 갱신 주기(초) | `~/.claude/settings.json` → `statusLine.refreshInterval` | 1 / 2 / 5 / 15초, **최소 1초** |
 | 언어 | `~/.claude/.dspg_config.json` → `language` | `auto`(시스템 표시 언어 따름) / `en` / `zh`. UI 문구는 현재 영어·중국어를 지원하며 그 외 언어는 영어로 폴백 |
 | 모델 테마 색상 | `~/.claude/.dspg_config.json` → `model_theme` | `true`(기본): 브랜드 색 / `false`: 단색 |
