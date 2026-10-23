@@ -427,13 +427,20 @@ def read_session_id():
 
 def check_override(session_id):
     """放行文件有效且未过期 → True。
-    单用户本机：不比较 session_id（hook stdin 的 session_id 时有时无，
-    比较会导致放行不稳定），放行即本机全会话生效。"""
+
+    **按会话生效**：给了 session_id 且放行记录也有 session_id 时必须一致；
+    任一缺失时退化为「本机生效」（hook stdin 的 session_id 时有时无，不能因此误判）。
+    """
     try:
         d = json.loads(OVERRIDE_FILE.read_text(encoding="utf-8"))
     except Exception:
         return False
-    return time.time() < d.get("expires", 0)
+    if time.time() >= d.get("expires", 0):
+        return False
+    sid = d.get("session_id")
+    if session_id and sid and sid != session_id:
+        return False
+    return True
 
 
 def write_override(session_id, minutes):
@@ -632,27 +639,31 @@ def _release_popup_mutex(h):
         pass
 
 
-def _last_decision():
-    """最近一次决定 → (decision_dict, age)；没有则 (None, None)。"""
+def _last_decision(session_id=None):
+    """最近一次决定 → (decision_dict, age)；没有/不属于当前会话则 (None, None)。"""
     try:
         d = json.loads(LAST_DECISION_FILE.read_text(encoding="utf-8"))
+        sid = d.get("session_id")
+        if session_id and sid and sid != session_id:
+            return None, None
         return d, time.time() - d.get("ts", 0)
     except Exception:
         return None, None
 
 
-def _remember_decision(decision):
+def _remember_decision(decision, session_id=None):
     try:
         LAST_DECISION_FILE.write_text(json.dumps({
             "ts": time.time(),
             "result": decision.get("result"),
             "minutes": decision.get("minutes", 0),
+            "session_id": session_id,
         }), encoding="utf-8")
     except Exception:
         pass
 
 
-def ask_user(message, simulate=None):
+def ask_user(message, simulate=None, session_id=None):
     """弹窗并等待决策；返回 {"result": "yes"/"no", "minutes": N}。
 
     simulate: "yes"/"no" 测试用；None=真实弹窗。
@@ -665,9 +676,9 @@ def ask_user(message, simulate=None):
         return {"result": "no", "minutes": 0}
     mtx = _acquire_popup_mutex((POPUP_WAIT_SEC + 5) * 1000)
     try:
-        if check_override(None):      # 排队期间别的实例可能已经拿到放行
+        if check_override(session_id):      # 排队期间别的实例可能已经拿到放行
             return {"result": "yes", "minutes": 1}
-        prev, age = _last_decision()
+        prev, age = _last_decision(session_id)
         if prev is not None:
             minutes = int(prev.get("minutes") or 0)
             ttl = DECISION_REUSE_SEC if minutes else 5
@@ -678,7 +689,7 @@ def ask_user(message, simulate=None):
         decision = wait_decision(timeout=3)
         if decision is None:
             decision = {"result": "no", "minutes": 0}
-        _remember_decision(decision)
+        _remember_decision(decision, session_id)
         return decision
     finally:
         if mtx:
@@ -803,7 +814,7 @@ def main():
         + i18n.t("balance.line", balance=balance_txt) + "\n\n"
         + i18n.t("window.tail")
     )
-    decision = ask_user(popup_msg, simulate=args.simulate_popup)
+    decision = ask_user(popup_msg, simulate=args.simulate_popup, session_id=session_id)
     if decision.get("result") == "yes":
         minutes = int(decision.get("minutes") or 0)
         if minutes > 0:

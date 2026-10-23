@@ -826,6 +826,11 @@ def main(argv=None):
     countdown = ""
     try:
         ov = json.loads(OVERRIDE_FILE.read_text(encoding="utf-8"))
+        # 放行按会话生效：别的会话的放行不在本会话状态栏显示倒计时
+        ov_sid = ov.get("session_id")
+        cur_sid = str(payload.get("session_id") or "")
+        if cur_sid and ov_sid and cur_sid != ov_sid:
+            raise ValueError("override belongs to another session")
         remaining = ov.get("expires", 0) - time.time()
         if remaining > 0:
             countdown = i18n.t("override", time=fmt_mmss(remaining))
