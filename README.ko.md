@@ -16,7 +16,7 @@
 
 ```bash
 # Claude Code 안에서
-/plugin marketplace add <당신의 GitHub 계정>/claude-code-statusline
+/plugin marketplace add HongtaoWang75/claude-code-statusline
 /plugin install claude-code-statusline@claude-code-statusline
 ```
 

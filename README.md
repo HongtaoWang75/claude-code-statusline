@@ -16,7 +16,7 @@ Guard rails for **Claude Code + DeepSeek**: a hard block during DeepSeek's peak-
 
 ```bash
 # inside Claude Code
-/plugin marketplace add <your-github-account>/claude-code-statusline
+/plugin marketplace add HongtaoWang75/claude-code-statusline
 /plugin install claude-code-statusline@claude-code-statusline
 ```
 

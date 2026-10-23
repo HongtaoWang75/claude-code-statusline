@@ -16,7 +16,7 @@
 
 ```bash
 # 在 Claude Code 里
-/plugin marketplace add <你的 GitHub 账号>/claude-code-statusline
+/plugin marketplace add HongtaoWang75/claude-code-statusline
 /plugin install claude-code-statusline@claude-code-statusline
 ```
 
