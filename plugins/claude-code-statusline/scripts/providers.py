@@ -116,12 +116,15 @@ THEMES = {
     "moonshot": ["#F5F5F5", "#1080F0", "#2494FF"],
     "anthropic": ["#D07050", "#E48464", "#FD9D7D"],  # 取色自 Claude 星芒橙
     "openai": ["#10A37F", "#24B793", "#3DD0AC"],
-    # Gemini：取自图标渐变的四色（蓝为主，红/黄/绿为辅助）
-    "gemini": ["#3781E8", "#C34E5C", "#C4AD22", "#3AAC5A"],
+    # Gemini：图标渐变四色，顺序按红 → 黄 → 绿 → 蓝（整段常驻渐变，见 GRADIENT_PROVIDERS）
+    "gemini": ["#C34E5C", "#C4AD22", "#3AAC5A", "#3781E8"],
     "glm": ["#3859FF", "#4C6DFF", "#6586FF"],
     "xiaomi": ["#FF6900", "#FF7D14", "#FF962D"],
     "unknown": ["#9CA3AF", "#B0B7C3", "#C9D0DC"],
 }
+
+# 这些 provider 的模型名**常驻整段渐变**（不是纯色 + 动效高光）
+GRADIENT_PROVIDERS = {"gemini"}
 
 # 内置价格：每 1M tokens，单位 = provider 货币。只收官方公开、可核实的数字。
 # DeepSeek：2026-10-22 从官方定价页抓取（空闲价；官方说明"空闲价 = 高峰价的一半"）。

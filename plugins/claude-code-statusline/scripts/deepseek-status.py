@@ -147,7 +147,7 @@ def _hex_rgb(value):
 
 
 def themed_text(text, provider, enabled=True):
-    """模型名静态显示：统一用纯色底色（该 provider 的主品牌色）。
+    """模型名静态显示：默认纯色主品牌色；GRADIENT_PROVIDERS 整段常驻渐变。
 
     动效（移动高光/多种配色）由本地扩展 theme_demo_local.py 叠加；
     enabled=False（`.dspg_config.json` 的 model_theme=false）→ 原样返回。
@@ -158,10 +158,18 @@ def themed_text(text, provider, enabled=True):
     if not stops:
         return text
     try:
-        rgb = _hex_rgb(stops[0])
+        rgbs = [_hex_rgb(c) for c in stops]
     except Exception:
         return text
-    return _ansi_rgb(rgb) + text + RESET
+    if provider in getattr(providers, "GRADIENT_PROVIDERS", set()) and len(rgbs) > 1:
+        n = len(text)
+        out = []
+        for i, ch in enumerate(text):
+            pos = (i / max(1, n - 1)) * (len(rgbs) - 1)
+            idx = min(int(pos), len(rgbs) - 2)
+            out.append(_ansi_rgb(_lerp_rgb(rgbs[idx], rgbs[idx + 1], pos - idx)) + ch)
+        return "".join(out) + RESET
+    return _ansi_rgb(rgbs[0]) + text + RESET
 
 
 def warn_rgb(value, warn_at, crit_at):
