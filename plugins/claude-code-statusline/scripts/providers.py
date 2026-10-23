@@ -112,10 +112,10 @@ PROVIDERS = {
 # 静态用主色；动效高光在辅助色之间轮换——有层次但不换色相，不会变成彩虹字。
 THEMES = {
     "deepseek": ["#4D6BFE", "#617FFF", "#7A98FF"],
-    "moonshot": ["#1783FF", "#2B97FF", "#44B0FF"],
-    "anthropic": ["#D97757", "#EB8B6B", "#FFA484"],
+    "moonshot": ["#1080F0", "#2494FF", "#3DADFF"],   # 取色自 Kimi 图标蓝点
+    "anthropic": ["#D07050", "#E48464", "#FD9D7D"],  # 取色自 Claude 星芒橙
     "openai": ["#10A37F", "#24B793", "#3DD0AC"],
-    "gemini": ["#4893FC", "#5CA7FF", "#75C0FF"],
+    "gemini": ["#3080F0", "#4494FF", "#5DADFF"],     # 取色自 Gemini 菱形主蓝
     "glm": ["#3859FF", "#4C6DFF", "#6586FF"],
     "xiaomi": ["#FF6900", "#FF7D14", "#FF962D"],
     "unknown": ["#9CA3AF", "#B0B7C3", "#C9D0DC"],
