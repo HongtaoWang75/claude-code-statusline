@@ -65,8 +65,20 @@ DECISION_FILE = HOME / ".claude" / ".dspg_decision.json"
 LAST_DECISION_FILE = HOME / ".claude" / ".dspg_last_decision.json"
 MUTEX_NAME = "Local\\DSPG_Popup_Lock"   # 跨进程弹窗互斥：并发工具调用只弹一个窗
 DECISION_REUSE_SEC = 60                 # 刚做过决定（含超时=拒绝）→ 60 秒内复用，不再弹
-# 定时/唤醒类工具永远放行（详见 main）：被拦的话模型连"预约到空闲时段"都做不到
-SCHEDULING_TOOLS = ("CronCreate", "CronList", "CronDelete", "ScheduleWakeup")
+# 定时/唤醒/监视类工具永远放行（详见 main）：被拦的话模型连"预约到空闲时段"都做不到
+SCHEDULING_TOOLS = ("CronCreate", "CronList", "CronDelete", "ScheduleWakeup", "Monitor")
+# 加载这些工具 schema 的 ToolSearch 也要放行，否则模型根本拿不到 CronCreate 的调用方式
+SCHEDULING_KEYWORDS = ("Cron", "ScheduleWakeup", "Monitor")
+
+
+def is_scheduling_call(tool_name, tool_input):
+    """定时/唤醒/监视类调用（含为它们加载 schema 的 ToolSearch）。"""
+    if tool_name in SCHEDULING_TOOLS:
+        return True
+    if tool_name == "ToolSearch":
+        q = str((tool_input or {}).get("query") or "")
+        return any(k in q for k in SCHEDULING_KEYWORDS)
+    return False
 CONFIG_FILE = HOME / ".claude" / ".dspg_config.json"      # 弹窗方式 / 刷新秒数
 HOOK_LOG = HOME / ".claude" / ".dspg_hook.log"            # 判定日志（每次调用一行）
 PAYLOAD_DUMP = HOME / ".claude" / ".dspg_hook_payload.json"   # 最近一次 hook 原始载荷
@@ -547,7 +559,7 @@ def ensure_popup_ps1():
     )
     minutes = ", ".join(str(m) for m, _ in ALLOW_CHOICES)
     ps1 = """# DSPG popup - WPF dialog, follows system light/dark theme
-param([string]$Title, [string]$Message, [string]$IconLight, [string]$IconDark, [int]$WaitSec, [string]$Theme = 'auto')
+param([string]$Title, [string]$Message, [string]$IconLight, [string]$IconDark, [int]$WaitSec, [string]$Theme = 'auto', [int]$AutoSelect = -1, [string]$Detail = '')
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 Add-Type -TypeDefinition @"
 using System;
@@ -572,10 +584,14 @@ if ($Theme -eq 'light') {
 if ($dark) {
   $bg = '#1E1E1E'; $fg = '#ECECEC'; $panel = '#2B2B2B'; $border = '#3C3C3C'
   $hover = '#3A3A3A'; $pressed = '#454545'; $sel = '#2F5DB3'; $arrow = '#B0B0B0'
+  $dim = '#9A9A9A'
 } else {
   $bg = '#FAF9F5'; $fg = '#1F1F1F'; $panel = '#FFFFFF'; $border = '#D9D6CE'
   $hover = '#EFEDE6'; $pressed = '#E3E0D8'; $sel = '#2F5DB3'; $arrow = '#6B6B6B'
+  $dim = '#6E6B66'
 }
+$cmdLabel = '%s'
+$hintText = '%s'
 
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -675,10 +691,17 @@ $xaml = @"
     <ComboBox x:Name="Choice" Style="{StaticResource DarkCombo}" Margin="0,18,0,0">
 %s
     </ComboBox>
+    <TextBlock x:Name="CmdLabel" Text="$cmdLabel" Foreground="$dim" FontSize="12" Margin="0,16,0,6"/>
+    <Border x:Name="CmdBox" Background="$panel" BorderBrush="$border" BorderThickness="1" CornerRadius="6" Padding="10">
+      <TextBox x:Name="Detail" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0"
+               Background="Transparent" Foreground="$fg" FontFamily="Consolas, Microsoft YaHei UI"
+               FontSize="12" MaxHeight="120" VerticalScrollBarVisibility="Auto"/>
+    </Border>
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
       <Button x:Name="Yes" Content="是" Width="96" Style="{StaticResource DarkButton}" Margin="0,0,10,0"/>
       <Button x:Name="No" Content="否" Width="96" Style="{StaticResource DarkButton}"/>
     </StackPanel>
+    <TextBlock x:Name="Hint" Text="$hintText" Foreground="$dim" FontSize="11" Margin="0,14,0,0"/>
   </StackPanel>
 </Window>
 "@
@@ -687,6 +710,11 @@ $reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $win = [System.Windows.Markup.XamlReader]::Load($reader)
 $win.Title = $Title
 $win.FindName('Msg').Text = $Message
+$win.FindName('Detail').Text = $Detail
+if (-not $Detail) {
+  $win.FindName('CmdLabel').Visibility = 'Collapsed'
+  $win.FindName('CmdBox').Visibility = 'Collapsed'
+}
 $iconPath = if ($dark) { $IconDark } else { $IconLight }
 try {
   $fs = [System.IO.File]::OpenRead($iconPath)
@@ -697,22 +725,11 @@ try {
 } catch { }
 
 $minutes = @(%s)
-$script:answer = 'no'
-$script:minutes = 0
-$win.FindName('Yes').Add_Click({
-  $script:answer = 'yes'
-  $script:minutes = $minutes[$win.FindName('Choice').SelectedIndex]
-  $win.DialogResult = $true
-  $win.Close()
-})
-$win.FindName('No').Add_Click({
-  $script:answer = 'no'
-  $win.DialogResult = $false
-  $win.Close()
-})
+$win.FindName('Yes').Add_Click({ $win.DialogResult = $true; $win.Close() })
+$win.FindName('No').Add_Click({ $win.DialogResult = $false; $win.Close() })
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds([Math]::Max(1, $WaitSec))
-$timer.Add_Tick({ $timer.Stop(); $script:answer = 'no'; $win.DialogResult = $false; $win.Close() })
+$timer.Add_Tick({ $timer.Stop(); $win.DialogResult = $false; $win.Close() })
 $timer.Start()
 $win.Add_SourceInitialized({
   try {
@@ -721,27 +738,60 @@ $win.Add_SourceInitialized({
     [void][DspgDark]::DwmSetWindowAttribute($helper.Handle, 20, [ref]$v, 4)
   } catch { }
 })
+if ($AutoSelect -ge 0) {
+  # 测试用：自动选中第 N 项并点「是」
+  $script:autoSel = $AutoSelect
+  $auto = New-Object System.Windows.Threading.DispatcherTimer
+  $auto.Interval = [TimeSpan]::FromMilliseconds(400)
+  $auto.Add_Tick({
+    $auto.Stop()
+    $i = [Math]::Min([Math]::Max(0, $script:autoSel), $minutes.Count - 1)
+    $win.FindName('Choice').SelectedIndex = $i
+    $revt = New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)
+    $win.FindName('Yes').RaiseEvent($revt)
+  })
+  $auto.Start()
+}
+$win.Add_Loaded({ $win.FindName('Choice').Focus() | Out-Null })
+$win.Add_KeyDown({
+  param($sender, $e)
+  if ($e.Key -eq [System.Windows.Input.Key]::Escape) {
+    $win.DialogResult = $false
+    $win.Close()
+  } elseif ($e.Key -eq [System.Windows.Input.Key]::Return) {
+    if ($win.FindName('Choice').IsDropDownOpen) { return }
+    $win.DialogResult = $true
+    $win.Close()
+  }
+})
 $null = $win.ShowDialog()
 $timer.Stop()
-$r = if ($script:answer -eq 'yes') { 'yes' } else { 'no' }
-$m = if ($r -eq 'yes') { $script:minutes } else { 0 }
+# 关闭后统一读取选择：事件处理器里读控件/脚本变量在 PowerShell 下不可靠
+$r = if ($win.DialogResult -eq $true) { 'yes' } else { 'no' }
+$m = 0
+if ($r -eq 'yes') {
+  $idx = 0
+  try { $idx = $win.FindName('Choice').SelectedIndex } catch { }
+  if ($idx -lt 0) { $idx = 0 }
+  if ($idx -lt $minutes.Count) { $m = $minutes[$idx] }
+}
 $decision = @{ result = $r; minutes = $m; ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() }
 $decision | ConvertTo-Json | Out-File -FilePath '%s' -Encoding UTF8
-""" % (items, minutes, DECISION_FILE.as_posix())
+""" % (i18n.t("popup.cmd"), i18n.t("popup.hint"), items, minutes, DECISION_FILE.as_posix())
     try:
         POPUP_PS1.write_text(ps1, encoding="utf-8-sig")
     except Exception:
         pass
 
 
-def show_popup(title, message):
+def show_popup(title, message, detail=""):
     """同步弹窗并等用户选择（脚本内最多等 POPUP_WAIT_SEC 秒），完成后返回。"""
     try:
         subprocess.run(
             [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-File", str(POPUP_PS1), "-Title", title, "-Message", message,
              "-IconLight", str(ICON_LIGHT), "-IconDark", str(ICON_DARK),
-             "-WaitSec", str(POPUP_WAIT_SEC)],
+             "-WaitSec", str(POPUP_WAIT_SEC), "-Detail", detail],
             timeout=POPUP_WAIT_SEC + 5,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -800,6 +850,32 @@ def _remember_decision(decision, session_id=None):
         pass
 
 
+def format_tool_detail(payload, limit=700):
+    """给弹窗展示的「待执行内容」摘要（命令 / 文件 / 参数）。"""
+    name = str(payload.get("tool_name") or "")
+    inp = payload.get("tool_input")
+    if not isinstance(inp, dict):
+        text = str(inp or "")
+    elif name in ("PowerShell", "Bash"):
+        cmd = str(inp.get("command") or inp.get("cmd") or "")
+        desc = str(inp.get("description") or "")
+        text = (desc + "\n" + cmd) if desc else cmd
+    elif name in ("Edit", "MultiEdit", "Write", "Read", "NotebookEdit"):
+        text = str(inp.get("file_path") or inp.get("notebook_path") or "")
+        if name in ("Edit", "MultiEdit"):
+            old = str(inp.get("old_string") or "")[:200]
+            new = str(inp.get("new_string") or "")[:200]
+            if old or new:
+                text += f"\n- {old}\n+ {new}"
+    else:
+        try:
+            text = json.dumps(inp, ensure_ascii=False)
+        except Exception:
+            text = str(inp)
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 def ask_user(message, simulate=None, session_id=None):
     """弹窗并等待决策；返回 {"result": "yes"/"no", "minutes": N}。
 
@@ -822,7 +898,7 @@ def ask_user(message, simulate=None, session_id=None):
             if age <= ttl:
                 return prev
         ensure_popup_ps1()
-        show_popup(i18n.t("popup.title"), message)
+        show_popup(i18n.t("popup.title"), message, format_tool_detail(read_payload()))
         decision = wait_decision(timeout=3)
         if decision is None:
             decision = {"result": "no", "minutes": 0}
@@ -875,9 +951,11 @@ def main():
         hook_log("pass  tool=- sid=- DSPG_BYPASS=1")
         return 0
 
-    # 定时/唤醒类工具永远放行：被拦的话模型连"预约到空闲时段"都做不到，
+    # 定时/唤醒/监视类工具永远放行：被拦的话模型连"预约到空闲时段"都做不到，
     # 而拦截文案恰恰在教它用 CronCreate 排期——不能自相矛盾（2026-10-20 用户报）。
-    if str(read_payload().get("tool_name") or "") in SCHEDULING_TOOLS:
+    # 同时放行为它们加载 schema 的 ToolSearch（2026-10-30 用户报"又被拦"的根因）。
+    _pl = read_payload()
+    if is_scheduling_call(str(_pl.get("tool_name") or ""), _pl.get("tool_input")):
         log_decision("pass", "scheduling-tool")
         return 0
 

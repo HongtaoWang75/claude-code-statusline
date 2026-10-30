@@ -856,7 +856,8 @@ def main(argv=None):
     model_txt = themed_text(disp_model, provider, enabled=use_theme)
     if tier and disp_model:
         model_txt = f"{RED}◆{RESET}" + model_txt
-    core = " · ".join(p for p in (model_txt, balance_txt, tag_txt) if p)
+    # 放行倒计时紧跟在峰谷倒计时之后
+    core = " · ".join(p for p in (model_txt, balance_txt, tag_txt, countdown) if p)
 
     # 用量段：缓存命中率 + 「当前上下文 × 轮数」+ 平均生成速度
     # 用乘积而不是会话累计总量：单看 162M 会和 CC 底部 `/clear to save 439k` 打架，
@@ -888,7 +889,7 @@ def main(argv=None):
         core = f"{core} · " + " · ".join(usage)
 
     save_blink_state(sid, blink)
-    print(f"{core} · {countdown}" if countdown else core)
+    print(core)
 
 
 def render_line(payload):
