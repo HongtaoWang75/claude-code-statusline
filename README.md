@@ -71,6 +71,8 @@ deepseek-flash[1m] · ¥22.39 · valley 2:08:03:09 · cache 99.6% · 310k toks×
 | `451tok/s` | Average output speed (computed from API time, excluding tool execution and waiting for you) |
 | `cost ¥0.42` | Session cost estimated from the price table (shown only when a price for the current model is known) |
 
+- **Subagent display**: while a subagent is active, the model segment switches to `model → agent-name` (e.g. `deepseek-flash[1m] → local-worker`), with the agent name in the accent color.
+
 **Colors**: values are colored only when they enter a warning zone; otherwise they stay plain, so an anomaly is visible at a glance.
 
 | Metric | Plain | Yellow | Gradient | Red |

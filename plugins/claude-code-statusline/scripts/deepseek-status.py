@@ -759,6 +759,7 @@ def main(argv=None):
     payload = read_stdin_payload()
     provider = detect_current_provider(payload)
     model_name = current_model(payload)
+    agent_name = str(((payload.get("agent") or {}).get("name")) or "")
     write_provider_file(provider, model_name)
 
     # --balance 只改显示用的余额，不落缓存、不联网（演示/预览余额配色用）
@@ -787,6 +788,7 @@ def main(argv=None):
             "provider": provider,
             "provider_name": providers.provider_name(provider),
             "model": model_name,
+            "agent": agent_name,
             "session_cost": cost,
             "session_cost_currency": (providers.PROVIDERS.get(provider) or {}).get("currency"),
             "peak": peak,
@@ -856,6 +858,11 @@ def main(argv=None):
     model_txt = themed_text(disp_model, provider, enabled=use_theme)
     if tier and disp_model:
         model_txt = f"{RED}◆{RESET}" + model_txt
+    # 切到子代理时自动切换显示：model → agent
+    if agent_name:
+        disp_agent = agent_name if len(agent_name) <= 20 else agent_name[:19] + "…"
+        model_txt += (f"\033[38;2;120;120;130m → {RESET}"
+                      f"\033[1;38;2;255;184;108m{disp_agent}{RESET}")
     # 放行倒计时紧跟在峰谷倒计时之后
     core = " · ".join(p for p in (model_txt, balance_txt, tag_txt, countdown) if p)
 
