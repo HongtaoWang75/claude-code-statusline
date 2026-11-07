@@ -878,7 +878,7 @@ def main(argv=None):
         usage.append(f"{tok_txt}×{seg_calls} turn{'s' if seg_calls > 1 else ''}")
     if rate is not None:
         shown = float(round(rate))   # 显示为整数，警戒也按显示值判
-        rate_txt = decorate(f"{rate:.0f}toks/s",
+        rate_txt = decorate(f"{rate:.0f}tok/s",
                             warn_rgb(shown, RATE_WARN_TPS, RATE_RED_TPS),  # <150 黄 → ≤100 红
                             "rate", blink)
         usage.append(rate_txt)
