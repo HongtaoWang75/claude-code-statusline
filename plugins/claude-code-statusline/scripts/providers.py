@@ -208,9 +208,11 @@ def get_api_key(provider):
         v = os.environ.get(name) or env.get(name)
         if v:
             return v
-    # CC 正在用的 token：只有 base URL 确实指向该 provider 时才借用
+    # CC 正在用的 token：base URL 指向该 provider，或指向本地路由器/代理
+    # （127.0.0.1 等，上游 key 由路由器持有）时借用
     u = base_url().lower()
-    if any(h in u for h in p.get("url_hints", ())):
+    loopback = any(h in u for h in ("127.0.0.1", "localhost", "[::1]", "0.0.0.0"))
+    if loopback or any(h in u for h in p.get("url_hints", ())):
         v = os.environ.get("ANTHROPIC_AUTH_TOKEN") or env.get("ANTHROPIC_AUTH_TOKEN")
         if v:
             return v
@@ -253,6 +255,11 @@ _BALANCE_PARSERS = {
     "deepseek": _balance_deepseek,
     "moonshot": _balance_moonshot,
 }
+
+
+def has_balance(provider):
+    """该 provider 有没有可查的余额接口（没有的别去联网、别写缓存）。"""
+    return provider in _BALANCE_PARSERS
 
 
 def fetch_balance(provider, key=None):

@@ -446,25 +446,53 @@ def load_cache():
         return None
 
 
-def fetch_and_store(provider=None):
-    """联网取余额并写缓存；成功返回余额，失败返回 None。
+def _cache_entries(cached):
+    """统一成 {provider: {ts, balance, currency, refreshing}}。
 
-    缓存带 provider：换了模型/端点后旧缓存自动作废，不会把别家的余额当成本家的。
+    缓存按 provider 分区：多个 CC 会话/子代理同时用不同模型时，各刷各的余额，
+    不会互相覆盖（旧版单 provider 平铺格式会自动迁移）。
     """
+    if not isinstance(cached, dict):
+        return {}
+    provs = cached.get("providers")
+    if isinstance(provs, dict):
+        return {k: v for k, v in provs.items() if isinstance(v, dict)}
+    old_prov = cached.get("provider")
+    if old_prov and ("balance" in cached or "ts" in cached):
+        return {old_prov: {k: cached[k] for k in
+                           ("ts", "balance", "currency", "refreshing") if k in cached}}
+    return {}
+
+
+def _cache_entry(cached, provider):
+    return _cache_entries(cached).get(provider)
+
+
+def _store_cache(entries):
+    try:
+        CACHE_FILE.write_text(json.dumps({"providers": entries}, ensure_ascii=False),
+                              encoding="utf-8")
+    except Exception:
+        pass
+
+
+def fetch_and_store(provider=None):
+    """联网取余额并写缓存；成功返回余额，失败返回 None。"""
     provider = provider or detect_current_provider()
+    if not providers.has_balance(provider):
+        return None
     key = get_api_key(provider)
     if not key:
         return None
     data = fetch_balance(key, provider)
     if not data:
         return None
-    try:
-        CACHE_FILE.write_text(json.dumps({
-            "ts": time.time(), "provider": provider,
-            "balance": data.get("balance"), "currency": data.get("currency"),
-        }), encoding="utf-8")
-    except Exception:
-        pass
+    entries = _cache_entries(load_cache())
+    entries[provider] = {
+        "ts": time.time(), "balance": data.get("balance"),
+        "currency": data.get("currency"),
+    }
+    _store_cache(entries)
     return data.get("balance")
 
 
@@ -474,12 +502,12 @@ def spawn_balance_refresh(cached, now, provider):
     渲染路径不联网的意义：每次渲染耗时都稳定，不会出现"网络卡一下把这一帧拖过
     刷新间隔 → 被 CC 取消 → 顺手 taskkill"的雪崩（2026-10-16 实测踩过）。
     """
-    if now - ((cached or {}).get("refreshing") or 0) < 20:
+    entry = _cache_entry(cached, provider) or {}
+    if now - (entry.get("refreshing") or 0) < 20:
         return
-    try:
-        CACHE_FILE.write_text(json.dumps({**(cached or {}), "refreshing": now}), encoding="utf-8")
-    except Exception:
-        pass
+    entries = _cache_entries(cached)
+    entries[provider] = {**entry, "refreshing": now}
+    _store_cache(entries)
     try:
         subprocess.Popen(
             [sys.executable, "-X", "utf8", str(pathlib.Path(__file__).resolve()),
@@ -495,19 +523,21 @@ def get_balance(force=False, provider=None):
     """读余额：**渲染路径只读本地缓存、绝不联网**；缓存过期就起后台进程去刷。
 
     force=True（`--refresh`，给 /balance 命令用）时才阻塞联网拿最新值。
-    provider 变了（换模型/换端点）→ 旧缓存作废，重新刷。
+    没有余额接口的 provider（unknown/anthropic/...）直接返回 None，不写缓存——
+    否则会把别的会话（如 DeepSeek）的余额冲掉。
     """
     provider = provider or detect_current_provider()
     cached = load_cache()
-    if cached and cached.get("provider") and cached["provider"] != provider:
-        cached = None
+    entry = _cache_entry(cached, provider)
     now = time.time()
-    age = now - ((cached or {}).get("ts") or 0)
+    age = now - ((entry or {}).get("ts") or 0)
     if force:
-        return fetch_and_store(provider) or ((cached or {}).get("balance"))
-    if cached is None or age > BALANCE_TTL:
+        return fetch_and_store(provider) or ((entry or {}).get("balance"))
+    if not providers.has_balance(provider):
+        return None
+    if entry is None or age > BALANCE_TTL:
         spawn_balance_refresh(cached, now, provider)
-    return (cached or {}).get("balance")
+    return (entry or {}).get("balance")
 
 
 def read_stdin_payload():

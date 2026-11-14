@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "DeepSeek 峰谷定价守护与余额监控插件",
-    "version": "1.0.0"
+    "version": "1.0.1"
   },
   "plugins": [
     {

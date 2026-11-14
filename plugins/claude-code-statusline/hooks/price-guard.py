@@ -229,7 +229,10 @@ def load_balance():
     """读取余额缓存；缓存属于别的 provider 时返回 None（不拿别家余额算 DeepSeek）。"""
     try:
         data = json.loads(BALANCE_CACHE.read_text(encoding="utf-8"))
-        prov = data.get("provider")
+        provs = data.get("providers")
+        if isinstance(provs, dict):          # 新格式：按 provider 分区
+            return (provs.get("deepseek") or {}).get("balance")
+        prov = data.get("provider")          # 旧格式：单 provider 平铺
         if prov and prov != "deepseek":
             return None
         return data.get("balance")
